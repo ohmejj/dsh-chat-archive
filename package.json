@@ -35,9 +35,14 @@
   "keywords": [
     "cordis",
     "dsh",
+    "dsh-plugin",
     "deepseek-harness",
     "archive",
-    "plugin"
+    "plugin",
+    "ui",
+    "agent-session",
+    "conversation",
+    "automation"
   ],
   "license": "MIT",
   "author": "ohmejj",
