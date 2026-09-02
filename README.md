@@ -34,17 +34,9 @@ dsh plugin --profile web add @ohmejj/dsh-chat-archive
 dsh plugin --profile tui add @ohmejj/dsh-chat-archive
 ```
 
-安装完成后，在 profile 目录下的 `cordis.patch.yml` 中添加插件配置：
+**安装后会自动配置**：`dsh plugin add` 命令会自动将插件添加到 profile 的 bundle 层，插件会在下次启动时自动加载。
 
-**编辑文件**：`~/.dsh/profiles/web/cordis.patch.yml`（根据你的 profile 调整路径）
-
-```yaml
-- insert:
-    - id: chat-archive
-      name: '@ohmejj/dsh-chat-archive'
-```
-
-然后重启 DSH：
+重启 DSH 即可使用：
 
 ```bash
 # 如果是 web profile
@@ -53,6 +45,8 @@ dsh --profile web
 
 # 如果是其他 profile，使用对应的启动命令
 ```
+
+**工作原理**：插件包含 `dsh.bundle.patch` 配置，会自动向 DSH 的 Cordis loader 注册自己。安装命令会将插件添加到 profile 的 `dsh.profile.bundles` 列表中，DSH 启动时会自动加载。
 
 ### 本地开发安装
 
@@ -72,6 +66,8 @@ npm run build
 # 使用一键脚本安装到 web profile
 bash scripts/enable-in-profile.sh web
 ```
+
+**注意**：本地开发安装使用软链接和手动配置 `cordis.patch.yml` 的方式，与通过 `dsh plugin add` 安装的机制不同。两种方式不应同时使用，否则会导致插件重复加载。
 
 ## 🎮 使用指南
 
@@ -137,7 +133,7 @@ node scripts/preview-archive.mjs 48 hours        # 48 小时阈值
 dsh plugin --profile web remove @ohmejj/dsh-chat-archive
 ```
 
-卸载后，还需要从 `cordis.patch.yml` 中移除插件配置，然后重启 DSH。
+**卸载后会自动清理**：卸载命令会自动从 profile 的 bundle 列表中移除插件。重启 DSH 即可生效。
 
 ### 使用脚本卸载（本地安装）
 
@@ -153,7 +149,7 @@ bash scripts/disable-from-profile.sh web
 
 依次检查：
 1. 确认插件已安装：`ls ~/.dsh/profiles/web/node_modules/@ohmejj/dsh-chat-archive`
-2. 确认 `cordis.patch.yml` 包含插件配置
+2. 确认插件已添加到 bundle 列表：检查 `~/.dsh/profiles/web/package.json` 中的 `dsh.profile.bundles` 是否包含插件
 3. **重启 DSH**（必须重启才能加载新插件）
 4. 刷新浏览器页面后重新打开设置
 
@@ -169,9 +165,25 @@ bash scripts/disable-from-profile.sh web
 2. 临时设置较小的阈值（如 1 小时）和间隔（如 5 分钟），保存后观察效果
 3. 打开包含老会话的工作区，观察会话是否从列表中消失
 
-### 插件安装后如何配置自动加载？
+### 插件安装后如何确认已正确加载？
 
-插件安装到 profile 后，需要在对应 profile 目录下的 `cordis.patch.yml` 文件中添加插件配置。DSH 启动时会读取该文件并加载配置的插件。
+插件通过 `dsh plugin add` 安装后，会自动添加到 profile 的 `dsh.profile.bundles` 列表中。可以通过以下方式确认：
+
+```bash
+# 查看 profile 的 package.json
+cat ~/.dsh/profiles/web/package.json | grep -A 5 '"bundles"'
+```
+
+应该能看到类似这样的输出：
+```json
+"bundles": [
+  "@deepseek-ai/dsh-base",
+  "@deepseek-ai/dsh-web-app",
+  "@ohmejj/dsh-chat-archive"
+]
+```
+
+重启 DSH 后，插件会自动加载，无需手动编辑配置文件。
 
 ## 📄 许可证
 
