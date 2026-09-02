@@ -1,0 +1,9 @@
+# dsh-chat-archive bundle patch (applied when the package is a profile layer).
+#
+# The single loader row mounts the host half (name resolves to this package's
+# "." export). The browser half (exports["./client"]) rides the same loader
+# entry, so Settings → Plugins can render the configuration card while the
+# Host half owns the archiver.
+- insert:
+    - id: chat-archive
+      name: '@ohmejj/dsh-chat-archive'
