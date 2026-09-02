@@ -63,8 +63,10 @@ dsh --profile web
 git clone https://github.com/ohmejj/dsh-chat-archive.git
 cd dsh-chat-archive
 
-# 构建
+# 安装依赖（包括 TypeScript 和类型定义）
 npm install
+
+# 构建
 npm run build
 
 # 使用一键脚本安装到 web profile
@@ -173,7 +175,7 @@ bash scripts/disable-from-profile.sh web
 
 ## 📄 许可证
 
-[MIT License](LICENSE)
+MIT License - 详见 [LICENSE](https://github.com/ohmejj/dsh-chat-archive/blob/main/LICENSE) 文件
 
 ## 👤 作者
 
@@ -184,7 +186,7 @@ bash scripts/disable-from-profile.sh web
 ## 🔗 相关链接
 
 - [GitHub 仓库](https://github.com/ohmejj/dsh-chat-archive)
-- [详细使用指南](docs/plugin-guide.zh.md)
+- [详细使用指南](https://github.com/ohmejj/dsh-chat-archive/blob/main/docs/plugin-guide.zh.md)
 - [DeepSeek Harness](https://github.com/anywhere-labs/dsh-desktop)
 - [DSH 插件开发文档](https://github.com/anywhere-labs/dsh-desktop/blob/master/docs/plugin-development.md)
 

@@ -19,13 +19,15 @@
     "dist",
     "cordis.patch.yml",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json && tsc -p tsconfig.client.json",
     "build:watch": "tsc -p tsconfig.json --watch",
     "test": "npm run build && node --test tests/",
-    "check": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit"
+    "check": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
+    "prepublishOnly": "npm run build"
   },
   "engines": {
     "node": ">=22.18.0"
@@ -39,9 +41,20 @@
   ],
   "license": "MIT",
   "author": "ohmejj",
+  "homepage": "https://github.com/ohmejj/dsh-chat-archive",
+  "bugs": {
+    "url": "https://github.com/ohmejj/dsh-chat-archive/issues"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/ohmejj/dsh-chat-archive.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3",
+    "@types/node": "^22.10.5"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
