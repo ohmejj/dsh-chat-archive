@@ -93,8 +93,11 @@ export class ChatArchiveRunner {
             this.rearm(config)
             // A bumped runNowTick is the card's explicit “Archive now”.
             const manual = config.runNowTick > this.lastRunNowTick
-            if (manual) this.lastRunNowTick = config.runNowTick
-            void this.runScan(manual ? 'manual' : 'config-change')
+            if (manual) {
+              this.lastRunNowTick = config.runNowTick
+              void this.runScan('manual')
+            }
+            // Config changes don't trigger immediate scan; wait for next interval
           },
         },
       )
