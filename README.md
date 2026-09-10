@@ -11,7 +11,7 @@
 - ⚙️ **灵活配置**：支持分钟/小时/天为单位设置闲置阈值
 - 🎯 **独立设置界面**：在 DSH 设置面板中提供独立的左侧菜单项
 - 💾 **配置持久化**：设置自动保存到 `$DSH_HOME/settings.yaml`
-- 🔄 **实时生效**：保存配置后立即触发一次扫描
+- 🔄 **实时生效**：保存配置后立即应用新的扫描间隔
 - 👁️ **预览功能**：提供预览脚本，可在不修改数据的情况下查看哪些会话将被归档
 
 ## 📦 安装
@@ -19,7 +19,7 @@
 ### 前置要求
 
 - Node.js >= 22.18.0
-- DeepSeek Harness (DSH) 已安装并配置
+- DeepSeek Harness (DSH) **0.1.5-rc.1 或更高**（适配最新版 API）已安装并配置
 
 ### 使用 DSH 命令安装（推荐）
 
@@ -48,26 +48,7 @@ dsh --profile web
 
 **工作原理**：插件包含 `dsh.bundle.patch` 配置，会自动向 DSH 的 Cordis loader 注册自己。安装命令会将插件添加到 profile 的 `dsh.profile.bundles` 列表中，DSH 启动时会自动加载。
 
-### 本地开发安装
 
-如果你需要从本地源码安装（用于开发或测试）：
-
-```bash
-# 克隆仓库
-git clone https://github.com/ohmejj/dsh-chat-archive.git
-cd dsh-chat-archive
-
-# 安装依赖（包括 TypeScript 和类型定义）
-npm install
-
-# 构建
-npm run build
-
-# 使用一键脚本安装到 web profile
-bash scripts/enable-in-profile.sh web
-```
-
-**注意**：本地开发安装使用软链接和手动配置 `cordis.patch.yml` 的方式，与通过 `dsh plugin add` 安装的机制不同。两种方式不应同时使用，否则会导致插件重复加载。
 
 ## 🎮 使用指南
 
@@ -89,9 +70,10 @@ bash scripts/enable-in-profile.sh web
 ### 使用说明
 
 - **修改配置**：在界面中修改配置后，点击 **保存** 按钮才会生效（可点击 **放弃** 取消修改）
-- **配置生效**：保存成功后会立即触发一次扫描，并显示"已保存，立即生效"提示
+- **配置生效**：保存成功后会立即应用新的扫描间隔，并显示"已保存，立即生效"提示
+- **立即归档**：如需立即执行归档，点击 **立即归档** 按钮
 - **持久化**：配置自动保存到 `$DSH_HOME/settings.yaml` 的 `chat-archive` 章节
-- **周期执行**：首次扫描后，按设定的扫描间隔定期执行
+- **周期执行**：按设定的扫描间隔定期执行
 
 ### 归档规则
 
@@ -100,7 +82,7 @@ bash scripts/enable-in-profile.sh web
   - 当前正在运行的会话
   - 已经在归档集中的会话
   - 无法确定活动时间的会话
-- 📏 **闲置时间判定**：基于会话持久化日志文件（`session.jsonl`）的最后修改时间（mtime）
+- 📏 **闲置时间判定**：基于会话持久化日志文件（`session.jsonl.*`，如 `session.jsonl.zstd`）的最后修改时间（mtime）；Host 在 `$DSH_HOME/sessions` 下按会话 id 定位该工件
 - 🛡️ **防误归档**：会话须连续闲置 `max(阈值, 一个完整扫描间隔)` 才会被归档
 
 ## 🔍 预览功能
@@ -122,7 +104,7 @@ node scripts/preview-archive.mjs 48 hours        # 48 小时阈值
 - 仍然活跃的会话
 - 不会触及的会话（正在运行、已归档等）
 
-**注意**：预览功能需要从插件源码目录运行。
+
 
 ## 🗑️ 卸载
 
@@ -134,12 +116,6 @@ dsh plugin --profile web remove @ohmejj/dsh-chat-archive
 ```
 
 **卸载后会自动清理**：卸载命令会自动从 profile 的 bundle 列表中移除插件。重启 DSH 即可生效。
-
-### 使用脚本卸载（本地安装）
-
-```bash
-bash scripts/disable-from-profile.sh web
-```
 
 **注意**：卸载插件不会影响已归档的会话，这些会话仍然存在于归档集中，可通过 DSH 原生功能恢复。
 
@@ -161,9 +137,9 @@ bash scripts/disable-from-profile.sh web
 
 ### 如何验证插件是否在工作？
 
-1. 使用预览脚本查看将被归档的会话（需要从插件源码目录运行）
-2. 临时设置较小的阈值（如 1 小时）和间隔（如 5 分钟），保存后观察效果
-3. 打开包含老会话的工作区，观察会话是否从列表中消失
+1. 临时设置较小的阈值（如 1 小时）和间隔（如 5 分钟），保存后点击"立即归档"
+2. 打开包含老会话的工作区，观察会话是否从列表中消失
+3. 检查 `$DSH_HOME/settings.yaml` 中的 `chat-archive` 配置是否生效
 
 ### 插件安装后如何确认已正确加载？
 
@@ -200,7 +176,6 @@ MIT License - 详见 [LICENSE](https://github.com/ohmejj/dsh-chat-archive/blob/m
 - [GitHub 仓库](https://github.com/ohmejj/dsh-chat-archive)
 - [详细使用指南](https://github.com/ohmejj/dsh-chat-archive/blob/main/docs/plugin-guide.zh.md)
 - [DeepSeek Harness](https://github.com/anywhere-labs/dsh-desktop)
-- [DSH 插件开发文档](https://github.com/anywhere-labs/dsh-desktop/blob/master/docs/plugin-development.md)
 
 ## 🤝 贡献
 

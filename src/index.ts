@@ -12,7 +12,7 @@ export const name = '@ohmejj/dsh-chat-archive'
 export const description = '自动归档超过闲置阈值的 DSH 会话（对话自动归档）'
 
 /** Services the runner needs; the loader waits for all of them before apply. */
-export const inject = ['sessionPersistence', 'workspaceRegistry', 'sessions']
+export const inject = ['sessionPersistence', 'workspaceRegistry', 'sessions', 'settings']
 
 /** Plugin entry: wire the archiver into this profile's Host. */
 export function apply(ctx: Context): void {

@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-09-10
+
+### Changed
+- 🔼 **适配 DeepSeek Harness 0.1.5-rc.1（最新版）**：peerDependencies 更新为 `^0.1.5-rc.1`。
+- 🔄 **Host 端迁移到新的 sessionPersistence API**：
+  - `list()` 现在返回 `SessionPersistenceSnapshot[]`（通过 `.header.id` 取会话 id）；
+  - 0.1.5 移除了 `locate()`，闲置时间改为在 `$DSH_HOME/sessions` 下按会话 id 扫描 `session.jsonl.*` 工件并读取其 mtime（同时兼容 `session-<id>` 与 `<id>` 两种目录命名）。
+- ⚙️ **设置命名空间注册改为 `ctx.settings.installSection(...)`**（0.1.5 移除了自由函数 `installSettingsSection`/`settingsNamespace`），并在插件 inject 列表中加入 `settings` 服务。
+- 🎨 **客户端快照存储依赖迁移**：`@deepseek-ai/dsh-client-runtime`（已不再发布）→ `@deepseek-ai/dsh-client-store`；`dsh.client.inject` 移除已失效的 `dsh-client-runtime`。
+
+### Fixed
+- 预览脚本与 Host 自检脚本改为基于 `$DSH_HOME/sessions` 目录结构（不再依赖已移除的 `locate()`），并兼容裸 id 会话目录。
+
+[0.4.0]: https://github.com/ohmejj/dsh-chat-archive/releases/tag/v0.4.0
+
 ## [0.3.0] - 2025-01-09
 
 ### Added

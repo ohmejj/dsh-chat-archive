@@ -79,7 +79,7 @@ interface SectionState {
 function dshChatArchiveClientFactory(requireFn: (id: string) => any): Record<string, unknown> {
   const module = { exports: {} as Record<string, unknown> }
   const React = requireFn('react')
-  const { createSnapshotStore } = requireFn('@deepseek-ai/dsh-client-runtime/client')
+  const { createSnapshotStore } = requireFn('@deepseek-ai/dsh-client-store')
 
   // ── styles (injected once per page; tokens follow the app's design vars) ──
   const css = [
