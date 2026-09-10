@@ -12,9 +12,18 @@
  * Only NON-live sessions are ever archived, and only sessions the workspace
  * registry does not already hold in its archive set — so this is idempotent
  * and never hides a conversation that is currently running.
+ *
+ * DSH >= 0.1.5 note: the durable session-persistence seam no longer exposes a
+ * `locate()` that returns the backend artifact path, so idle time can no
+ * longer be read via a service call. Instead we resolve the `session.jsonl.*`
+ * artifact directly under the harness home (`$DSH_HOME/sessions/…`, by
+ * default `~/.dsh/sessions/…`) with a per-scan tree walk keyed by session id,
+ * then stat its mtime as the last-activity signal. Sessions whose artifact
+ * cannot be found are treated as “undeterminable” and never archived.
  */
-import { stat } from 'node:fs/promises'
-import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
+import { readdir, stat } from 'node:fs/promises'
+import { homedir } from 'node:os'
+import { basename, dirname, join } from 'node:path'
 import type { SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import { type ChatArchiveConfig, DEFAULT_CONFIG, SETTINGS_NAMESPACE, configSchema, effectiveIdleMs, validateConfig } from './config.js'
 import { decideArchivable, type SessionActivity } from './scan.js'
@@ -22,8 +31,7 @@ import { decideArchivable, type SessionActivity } from './scan.js'
 /** Structural slice of the Host context this runner needs. */
 export interface RunnerServices {
   sessionPersistence: {
-    list(signal?: AbortSignal): Promise<readonly SessionHeader[]>
-    locate(meta: SessionHeader): { kind: string; path: string } | undefined
+    list(signal?: AbortSignal): Promise<readonly { header: SessionHeader }[]>
   }
   workspaceRegistry: {
     readonly archivedSessionIds: readonly SessionId[]
@@ -32,8 +40,20 @@ export interface RunnerServices {
   sessions: {
     get(sessionId: SessionId): unknown
   }
+  settings: {
+    installSection<const Namespace extends string, T>(
+      owner: unknown,
+      ns: Namespace,
+      schema: unknown,
+      entry: T,
+      hooks: {
+        setSource(current: () => T): void
+        onChange(): void
+        validate?: (value: T) => void
+      },
+    ): void
+  }
   effect<T>(fn: (() => T | void), label?: string): T | void
-  on<K extends string>(event: K, listener: (...args: any[]) => void): () => void
 }
 
 /** One scan attempt's outcome (what was archived + why others were skipped). */
@@ -47,11 +67,57 @@ export interface ScanOutcome {
 
 const MS = 1000
 const INITIAL_SCAN_DELAY_MS = 3 * MS
+/** File name of a durable session log artifact (compressed or plain). */
+const SESSION_LOG_FILE = 'session.jsonl'
 
 /** Human summary for logs. */
 function summary(outcome: ScanOutcome): string {
   const parts = [`archived=${outcome.archived.length}`, `recent=${outcome.recent.length}`, `unknown=${outcome.undeterminable.length}`, `live=${outcome.live.length}`]
   return `[${outcome.trigger}] ${parts.join(' ')}`
+}
+
+/** Root directory that contains per-workspace session directories. */
+function sessionsRoot(): string {
+  const configured = process.env.DSH_HOME
+  const home = configured !== undefined && configured.trim().length > 0 ? configured.trim() : join(homedir(), '.dsh')
+  return join(home, 'sessions')
+}
+
+/**
+ * Walk the sessions tree once and index every durable log artifact by session
+ * id. The per-session directory is either `<id>` or `session-<id>` (both
+ * spellings appear across DSH versions), so the parent basename is normalized
+ * by stripping a leading `session-` prefix.
+ * @returns map from session id to its resolved artifact path.
+ */
+async function indexSessionLogs(root: string): Promise<Map<string, string>> {
+  const index = new Map<string, string>()
+  const stack = [root]
+  while (stack.length > 0) {
+    const current = stack.pop()
+    if (current === undefined) continue
+    let entries
+    try {
+      entries = await readdir(current, { withFileTypes: true })
+    } catch {
+      continue // missing or unreadable subtree — skip it
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        stack.push(join(current, entry.name))
+      } else if (entry.isFile() && entry.name.startsWith(SESSION_LOG_FILE)) {
+        const id = normalizeSessionDirName(basename(dirname(join(current, entry.name))))
+        if (id !== undefined && !index.has(id)) index.set(id, join(current, entry.name))
+      }
+    }
+  }
+  return index
+}
+
+/** Strip the optional `session-` prefix from a session directory's basename. */
+function normalizeSessionDirName(name: string): string | undefined {
+  const core = name.startsWith('session-') ? name.slice('session-'.length) : name
+  return core.length > 0 ? core : undefined
 }
 
 export class ChatArchiveRunner {
@@ -77,11 +143,11 @@ export class ChatArchiveRunner {
   /** Mount everything: settings namespace + initial scan. */
   start(): void {
     try {
-      installSettingsSection<ChatArchiveConfig>(
-        this.ctx as never,
-        settingsNamespace(SETTINGS_NAMESPACE),
-        configSchema as never,
-        DEFAULT_CONFIG as ChatArchiveConfig,
+      this.ctx.settings.installSection(
+        this.ctx,
+        SETTINGS_NAMESPACE,
+        configSchema,
+        DEFAULT_CONFIG,
         {
           validate: validateConfig,
           setSource: (next: () => ChatArchiveConfig) => {
@@ -125,7 +191,7 @@ export class ChatArchiveRunner {
     }, delayMs)
   }
 
-  /** One full scan: list → stat → decide → archive. */
+  /** One full scan: list → locate → stat → decide → archive. */
   async runScan(trigger: string): Promise<ScanOutcome | null> {
     const config = this.current()
     if (!config.enabled) {
@@ -140,19 +206,22 @@ export class ChatArchiveRunner {
       // that conversed during the most recent interval.
       const cutoff = now - effectiveIdleMs(config)
       const archivedIds = new Set<unknown>(this.ctx.workspaceRegistry.archivedSessionIds)
+      const indexed = await indexSessionLogs(sessionsRoot())
+      if (this.disposed) return null
       const headers = await this.ctx.sessionPersistence.list()
       if (this.disposed) return null
       const activities: SessionActivity[] = []
       const liveIds = new Set<unknown>()
       const liveList: unknown[] = []
-      for (const header of headers) {
-        if (archivedIds.has(header.id)) continue
-        if (this.ctx.sessions.get(header.id) !== undefined) {
-          liveIds.add(header.id)
-          liveList.push(header.id)
+      for (const snapshot of headers) {
+        const id = snapshot.header.id
+        if (archivedIds.has(id)) continue
+        if (this.ctx.sessions.get(id) !== undefined) {
+          liveIds.add(id)
+          liveList.push(id)
           continue
         }
-        activities.push({ id: header.id, activityMs: await this.lastActivityMs(header) })
+        activities.push({ id, activityMs: await this.lastActivityMs(id, indexed) })
       }
       const decision = decideArchivable(activities, archivedIds, liveIds, cutoff)
       for (const id of decision.selected) {
@@ -181,11 +250,11 @@ export class ChatArchiveRunner {
   }
 
   /** Last durable activity of one session = mtime of its backend artifact. */
-  private async lastActivityMs(header: SessionHeader): Promise<number | undefined> {
+  private async lastActivityMs(id: SessionId, indexed: Map<string, string>): Promise<number | undefined> {
+    const path = indexed.get(String(id))
+    if (path === undefined) return undefined
     try {
-      const location = this.ctx.sessionPersistence.locate(header)
-      if (location === undefined) return undefined
-      const info = await stat(location.path)
+      const info = await stat(path)
       return info.mtimeMs
     } catch {
       return undefined

@@ -19,7 +19,7 @@
 ### 前置要求
 
 - Node.js >= 22.18.0
-- DeepSeek Harness (DSH) 已安装并配置
+- DeepSeek Harness (DSH) **0.1.5-rc.1 或更高**（适配最新版 API）已安装并配置
 
 ### 使用 DSH 命令安装（推荐）
 
@@ -82,7 +82,7 @@ dsh --profile web
   - 当前正在运行的会话
   - 已经在归档集中的会话
   - 无法确定活动时间的会话
-- 📏 **闲置时间判定**：基于会话持久化日志文件（`session.jsonl`）的最后修改时间（mtime）
+- 📏 **闲置时间判定**：基于会话持久化日志文件（`session.jsonl.*`，如 `session.jsonl.zstd`）的最后修改时间（mtime）；Host 在 `$DSH_HOME/sessions` 下按会话 id 定位该工件
 - 🛡️ **防误归档**：会话须连续闲置 `max(阈值, 一个完整扫描间隔)` 才会被归档
 
 ## 🔍 预览功能
