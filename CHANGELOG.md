@@ -5,7 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2025-01-12
+
+### Fixed
+- Fixed configuration merge issue where missing `unit` and `intervalMinutes` fields in settings.yaml would prevent the archiver from starting
+- The `current()` method now properly merges partial configuration with default values
+
+[0.3.1]: https://github.com/ohmejj/dsh-chat-archive/compare/v0.3.0...v0.3.1
+
 ## [0.3.0] - 2025-01-09
+ - 2025-01-09
 
 ### Added
 - 🎯 独立的设置界面，在 DSH 设置面板中提供专属的左侧菜单项

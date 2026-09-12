@@ -71,9 +71,9 @@ export class ChatArchiveRunner {
 
   /** Current authoritative configuration (settings section when attached). */
   current(): ChatArchiveConfig {
-    return this.source() ?? DEFAULT_CONFIG
-  }
-
+  current(): ChatArchiveConfig {
+    const resolved = this.source() ?? DEFAULT_CONFIG
+    return { ...DEFAULT_CONFIG, ...resolved }
   /** Mount everything: settings namespace + initial scan. */
   start(): void {
     try {
