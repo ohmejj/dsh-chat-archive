@@ -79,7 +79,7 @@ interface SectionState {
 function dshChatArchiveClientFactory(requireFn: (id: string) => any): Record<string, unknown> {
   const module = { exports: {} as Record<string, unknown> }
   const React = requireFn('react')
-  const { createSnapshotStore } = requireFn('@deepseek-ai/dsh-client-runtime/client')
+  const { createSnapshotStore } = requireFn('@deepseek-ai/dsh-client-store')
 
   // ── styles (injected once per page; tokens follow the app's design vars) ──
   const css = [
@@ -184,10 +184,7 @@ function dshChatArchiveClientFactory(requireFn: (id: string) => any): Record<str
     discard: 'Discard',
     readOnly: 'This connection is read-only.',
   }
-  const lang: 'zh' | 'en' =
-    typeof document !== 'undefined' && typeof document.documentElement.lang === 'string' && document.documentElement.lang.toLowerCase().startsWith('zh')
-      ? 'zh'
-      : 'en'
+  const lang: 'zh' | 'en' = 'zh'  // 强制使用中文
   const t = (key: string): string => (lang === 'zh' ? zh[key] : en[key]) ?? key
 
   // ── field specs ──

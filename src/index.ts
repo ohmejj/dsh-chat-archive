@@ -12,7 +12,7 @@ export const name = '@ohmejj/dsh-chat-archive'
 export const description = '自动归档超过闲置阈值的 DSH 会话（对话自动归档）'
 
 /** Services the runner needs; the loader waits for all of them before apply. */
-export const inject = ['sessionPersistence', 'workspaceRegistry', 'sessions']
+export const inject = ['sessionPersistence', 'workspaceRegistry', 'sessions', 'settings']
 
 /** Plugin entry: wire the archiver into this profile's Host. */
 export function apply(ctx: Context): void {
@@ -28,7 +28,15 @@ export function apply(ctx: Context): void {
     }
     console.log(message)
   }
-  new ChatArchiveRunner(ctx as unknown as RunnerServices, log).start()
+  console.log('chat-archive: apply() called, starting runner...')
+  log('chat-archive: apply() called, starting runner...')
+  try {
+    new ChatArchiveRunner(ctx as unknown as RunnerServices, log).start()
+    console.log('chat-archive: runner started successfully')
+  } catch (error) {
+    console.error('chat-archive: runner failed to start:', error)
+    log(`chat-archive: runner failed to start: ${String(error)}`)
+  }
 }
 
 export { SETTINGS_NAMESPACE, DEFAULT_CONFIG, type ChatArchiveConfig, type ArchiveUnit, thresholdMs, effectiveIdleMs, validateConfig, UNIT_LABELS } from './config.js'
