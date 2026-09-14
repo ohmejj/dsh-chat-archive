@@ -82,7 +82,7 @@ dsh --profile web
   - 当前正在运行的会话
   - 已经在归档集中的会话
   - 无法确定活动时间的会话
-- 📏 **闲置时间判定**：基于会话持久化日志文件（`session.jsonl.*`，如 `session.jsonl.zstd`）的最后修改时间（mtime）；Host 在 `$DSH_HOME/sessions` 下按会话 id 定位该工件
+- 📏 **闲置时间判定**：基于会话持久化日志文件的最后修改时间（mtime）。通过 `sessionPersistence.locate()` 定位会话工件（如 `session.jsonl` / `session.jsonl.v3`），读取其 mtime 作为最后活动信号；`.v3.jsonl` 工件缺失时自动回退到旧版 `.jsonl`
 - 🛡️ **防误归档**：会话须连续闲置 `max(阈值, 一个完整扫描间隔)` 才会被归档
 
 ## 🔍 预览功能
