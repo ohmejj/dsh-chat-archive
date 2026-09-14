@@ -28,7 +28,15 @@ export function apply(ctx: Context): void {
     }
     console.log(message)
   }
-  new ChatArchiveRunner(ctx as unknown as RunnerServices, log).start()
+  console.log('chat-archive: apply() called, starting runner...')
+  log('chat-archive: apply() called, starting runner...')
+  try {
+    new ChatArchiveRunner(ctx as unknown as RunnerServices, log).start()
+    console.log('chat-archive: runner started successfully')
+  } catch (error) {
+    console.error('chat-archive: runner failed to start:', error)
+    log(`chat-archive: runner failed to start: ${String(error)}`)
+  }
 }
 
 export { SETTINGS_NAMESPACE, DEFAULT_CONFIG, type ChatArchiveConfig, type ArchiveUnit, thresholdMs, effectiveIdleMs, validateConfig, UNIT_LABELS } from './config.js'

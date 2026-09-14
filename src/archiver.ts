@@ -12,18 +12,9 @@
  * Only NON-live sessions are ever archived, and only sessions the workspace
  * registry does not already hold in its archive set — so this is idempotent
  * and never hides a conversation that is currently running.
- *
- * DSH >= 0.1.5 note: the durable session-persistence seam no longer exposes a
- * `locate()` that returns the backend artifact path, so idle time can no
- * longer be read via a service call. Instead we resolve the `session.jsonl.*`
- * artifact directly under the harness home (`$DSH_HOME/sessions/…`, by
- * default `~/.dsh/sessions/…`) with a per-scan tree walk keyed by session id,
- * then stat its mtime as the last-activity signal. Sessions whose artifact
- * cannot be found are treated as “undeterminable” and never archived.
  */
-import { readdir, stat } from 'node:fs/promises'
-import { homedir } from 'node:os'
-import { basename, dirname, join } from 'node:path'
+import { stat } from 'node:fs/promises'
+import type { SettingsProvider } from '@deepseek-ai/dsh-settings'
 import type { SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import { type ChatArchiveConfig, DEFAULT_CONFIG, SETTINGS_NAMESPACE, configSchema, effectiveIdleMs, validateConfig } from './config.js'
 import { decideArchivable, type SessionActivity } from './scan.js'
@@ -31,7 +22,8 @@ import { decideArchivable, type SessionActivity } from './scan.js'
 /** Structural slice of the Host context this runner needs. */
 export interface RunnerServices {
   sessionPersistence: {
-    list(signal?: AbortSignal): Promise<readonly { header: SessionHeader }[]>
+    list(signal?: AbortSignal): Promise<readonly { header: SessionHeader; revision: unknown; sizeBytes?: number }[]>
+    locate(meta: SessionHeader): { kind: string; path: string } | undefined
   }
   workspaceRegistry: {
     readonly archivedSessionIds: readonly SessionId[]
@@ -40,20 +32,9 @@ export interface RunnerServices {
   sessions: {
     get(sessionId: SessionId): unknown
   }
-  settings: {
-    installSection<const Namespace extends string, T>(
-      owner: unknown,
-      ns: Namespace,
-      schema: unknown,
-      entry: T,
-      hooks: {
-        setSource(current: () => T): void
-        onChange(): void
-        validate?: (value: T) => void
-      },
-    ): void
-  }
+  settings: SettingsProvider
   effect<T>(fn: (() => T | void), label?: string): T | void
+  on<K extends string>(event: K, listener: (...args: any[]) => void): () => void
 }
 
 /** One scan attempt's outcome (what was archived + why others were skipped). */
@@ -67,57 +48,11 @@ export interface ScanOutcome {
 
 const MS = 1000
 const INITIAL_SCAN_DELAY_MS = 3 * MS
-/** File name of a durable session log artifact (compressed or plain). */
-const SESSION_LOG_FILE = 'session.jsonl'
 
 /** Human summary for logs. */
 function summary(outcome: ScanOutcome): string {
   const parts = [`archived=${outcome.archived.length}`, `recent=${outcome.recent.length}`, `unknown=${outcome.undeterminable.length}`, `live=${outcome.live.length}`]
   return `[${outcome.trigger}] ${parts.join(' ')}`
-}
-
-/** Root directory that contains per-workspace session directories. */
-function sessionsRoot(): string {
-  const configured = process.env.DSH_HOME
-  const home = configured !== undefined && configured.trim().length > 0 ? configured.trim() : join(homedir(), '.dsh')
-  return join(home, 'sessions')
-}
-
-/**
- * Walk the sessions tree once and index every durable log artifact by session
- * id. The per-session directory is either `<id>` or `session-<id>` (both
- * spellings appear across DSH versions), so the parent basename is normalized
- * by stripping a leading `session-` prefix.
- * @returns map from session id to its resolved artifact path.
- */
-async function indexSessionLogs(root: string): Promise<Map<string, string>> {
-  const index = new Map<string, string>()
-  const stack = [root]
-  while (stack.length > 0) {
-    const current = stack.pop()
-    if (current === undefined) continue
-    let entries
-    try {
-      entries = await readdir(current, { withFileTypes: true })
-    } catch {
-      continue // missing or unreadable subtree — skip it
-    }
-    for (const entry of entries) {
-      if (entry.isDirectory()) {
-        stack.push(join(current, entry.name))
-      } else if (entry.isFile() && entry.name.startsWith(SESSION_LOG_FILE)) {
-        const id = normalizeSessionDirName(basename(dirname(join(current, entry.name))))
-        if (id !== undefined && !index.has(id)) index.set(id, join(current, entry.name))
-      }
-    }
-  }
-  return index
-}
-
-/** Strip the optional `session-` prefix from a session directory's basename. */
-function normalizeSessionDirName(name: string): string | undefined {
-  const core = name.startsWith('session-') ? name.slice('session-'.length) : name
-  return core.length > 0 ? core : undefined
 }
 
 export class ChatArchiveRunner {
@@ -137,43 +72,50 @@ export class ChatArchiveRunner {
 
   /** Current authoritative configuration (settings section when attached). */
   current(): ChatArchiveConfig {
-    return this.source() ?? DEFAULT_CONFIG
+    const resolved = this.source() ?? DEFAULT_CONFIG
+    return { ...DEFAULT_CONFIG, ...resolved }
   }
 
   /** Mount everything: settings namespace + initial scan. */
   start(): void {
+    console.log('chat-archive: start() called')
     try {
+      console.log('chat-archive: calling installSection...')
       this.ctx.settings.installSection(
-        this.ctx,
+        this.ctx as never,
         SETTINGS_NAMESPACE,
-        configSchema,
+        configSchema as never,
         DEFAULT_CONFIG,
         {
           validate: validateConfig,
           setSource: (next: () => ChatArchiveConfig) => {
+            console.log('chat-archive: setSource called')
             this.source = next
           },
           onChange: () => {
+            console.log('chat-archive: onChange triggered')
             if (this.disposed) return
             const config = this.current()
             this.rearm(config)
             // A bumped runNowTick is the card's explicit “Archive now”.
             const manual = config.runNowTick > this.lastRunNowTick
-            if (manual) {
-              this.lastRunNowTick = config.runNowTick
-              void this.runScan('manual')
-            }
-            // Config changes don't trigger immediate scan; wait for next interval
+            if (manual) this.lastRunNowTick = config.runNowTick
+            console.log(`chat-archive: scheduling scan (trigger: ${manual ? 'manual' : 'config-change'})`)
+            void this.runScan(manual ? 'manual' : 'config-change')
           },
         },
       )
+      console.log('chat-archive: installSection completed')
       this.log('chat-archive: settings section registered; archiver started')
     } catch (error) {
+      console.error('chat-archive: installSection failed:', error)
       this.log(`chat-archive: failed to register settings section: ${String(error)}`)
     }
     // Catch up on inactivity that accumulated while this profile was down.
+    console.log('chat-archive: scheduling initial scan')
     this.initialTimer = setTimeout(() => {
       this.initialTimer = null
+      console.log('chat-archive: running initial boot scan')
       void this.runScan('boot')
     }, INITIAL_SCAN_DELAY_MS)
   }
@@ -191,44 +133,56 @@ export class ChatArchiveRunner {
     }, delayMs)
   }
 
-  /** One full scan: list → locate → stat → decide → archive. */
+  /** One full scan: list → stat → decide → archive. */
   async runScan(trigger: string): Promise<ScanOutcome | null> {
+    console.log(`chat-archive: runScan called (trigger: ${trigger})`)
     const config = this.current()
+    console.log(`chat-archive: config - enabled: ${config.enabled}, threshold: ${config.threshold} ${config.unit}`)
     if (!config.enabled) {
       this.log('chat-archive: archiver disabled — skipping scan')
+      console.log('chat-archive: archiver disabled — skipping scan')
       return null
     }
-    if (this.scanning) return null
+    if (this.scanning) {
+      console.log('chat-archive: scan already in progress — skipping')
+      return null
+    }
     this.scanning = true
+    console.log('chat-archive: starting scan execution...')
     try {
       const now = Date.now()
       // idle ≥ max(threshold, one full scan interval): never archive a session
       // that conversed during the most recent interval.
       const cutoff = now - effectiveIdleMs(config)
+      console.log(`chat-archive: cutoff time: ${new Date(cutoff).toISOString()}`)
       const archivedIds = new Set<unknown>(this.ctx.workspaceRegistry.archivedSessionIds)
-      const indexed = await indexSessionLogs(sessionsRoot())
-      if (this.disposed) return null
-      const headers = await this.ctx.sessionPersistence.list()
+      console.log(`chat-archive: fetching session list...`)
+      const snapshots = await this.ctx.sessionPersistence.list()
+      console.log(`chat-archive: found ${snapshots.length} total sessions`)
       if (this.disposed) return null
       const activities: SessionActivity[] = []
       const liveIds = new Set<unknown>()
       const liveList: unknown[] = []
-      for (const snapshot of headers) {
-        const id = snapshot.header.id
-        if (archivedIds.has(id)) continue
-        if (this.ctx.sessions.get(id) !== undefined) {
-          liveIds.add(id)
-          liveList.push(id)
+      for (const snapshot of snapshots) {
+        const header = snapshot.header
+        if (archivedIds.has(header.id)) continue
+        if (this.ctx.sessions.get(header.id) !== undefined) {
+          liveIds.add(header.id)
+          liveList.push(header.id)
           continue
         }
-        activities.push({ id, activityMs: await this.lastActivityMs(id, indexed) })
+        activities.push({ id: header.id, activityMs: await this.lastActivityMs(header) })
       }
+      console.log(`chat-archive: ${activities.length} sessions to evaluate, ${liveList.length} live sessions`)
       const decision = decideArchivable(activities, archivedIds, liveIds, cutoff)
+      console.log(`chat-archive: decision - ${decision.selected.length} to archive, ${decision.recent.length} recent, ${decision.undeterminable.length} undeterminable`)
       for (const id of decision.selected) {
         if (this.disposed) break
         try {
+          console.log(`chat-archive: archiving session ${String(id)}`)
           await this.ctx.workspaceRegistry.archiveSession(id as SessionId)
         } catch (error) {
+          console.error(`chat-archive: archiveSession failed for ${String(id)}:`, error)
           this.log(`chat-archive: archiveSession failed for ${String(id)}: ${String(error)}`)
         }
       }
@@ -239,6 +193,7 @@ export class ChatArchiveRunner {
         undeterminable: decision.undeterminable,
         live: liveList,
       }
+      console.log(`chat-archive: scan completed - ${summary(outcome)}`)
       this.log(`chat-archive: ${summary(outcome)}${decision.selected.length > 0 ? ` (${decision.selected.join(', ')})` : ''}`)
       return outcome
     } catch (error) {
@@ -250,13 +205,38 @@ export class ChatArchiveRunner {
   }
 
   /** Last durable activity of one session = mtime of its backend artifact. */
-  private async lastActivityMs(id: SessionId, indexed: Map<string, string>): Promise<number | undefined> {
-    const path = indexed.get(String(id))
-    if (path === undefined) return undefined
+  private async lastActivityMs(header: SessionHeader): Promise<number | undefined> {
     try {
-      const info = await stat(path)
-      return info.mtimeMs
-    } catch {
+      const location = this.ctx.sessionPersistence.locate(header)
+      if (location === undefined) {
+        console.log(`chat-archive: locate returned undefined for session ${String(header.id)}`)
+        return undefined
+      }
+      console.log(`chat-archive: checking mtime for ${location.path}`)
+      
+      // 尝试读取文件 mtime
+      try {
+        const info = await stat(location.path)
+        console.log(`chat-archive: session ${String(header.id)} mtime: ${new Date(info.mtimeMs).toISOString()}`)
+        return info.mtimeMs
+      } catch (error: any) {
+        // 如果文件不存在且路径包含 .v3.jsonl，尝试回退到旧格式 .jsonl
+        if (error?.code === 'ENOENT' && location.path.includes('.v3.jsonl')) {
+          const fallbackPath = location.path.replace('.v3.jsonl', '.jsonl')
+          console.log(`chat-archive: trying fallback path: ${fallbackPath}`)
+          try {
+            const info = await stat(fallbackPath)
+            console.log(`chat-archive: session ${String(header.id)} mtime (fallback): ${new Date(info.mtimeMs).toISOString()}`)
+            return info.mtimeMs
+          } catch (fallbackError: any) {
+            console.error(`chat-archive: fallback also failed for session ${String(header.id)}:`, fallbackError)
+            return undefined
+          }
+        }
+        throw error
+      }
+    } catch (error) {
+      console.error(`chat-archive: failed to get mtime for session ${String(header.id)}:`, error)
       return undefined
     }
   }
