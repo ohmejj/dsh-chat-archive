@@ -65,6 +65,10 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(payload)
 }
 
+/** Module-scoped singleton state, shared across re-applies of this entry. */
+let runner: ChatArchiveRunner | undefined
+let routeDone = false
+
 /**
  * Plugin entry: keep a single runner across re-applies (config edits re-run
  * this with a new `config`), routing each resolved config into its
@@ -83,21 +87,19 @@ export function apply(ctx: Context, userConfig?: Partial<ChatArchiveConfig>): vo
     }
     console.log(message)
   }
-  const holder = ctx as { chatArchiveRunner?: ChatArchiveRunner; chatArchiveRouteDone?: boolean }
   const rootCtx = (ctx as { root?: Context }).root ?? ctx
   // cordis already resolved & validated `Config` before calling apply; treat it
   // as the authoritative resolved config.
   const resolved = ((userConfig ?? {}) as Partial<ChatArchiveConfig>) as ChatArchiveConfig
 
   try {
-    if (holder.chatArchiveRunner === undefined) {
-      const runner = new ChatArchiveRunner(ctx as unknown as RunnerServices, log)
-      holder.chatArchiveRunner = runner
+    if (runner === undefined) {
+      runner = new ChatArchiveRunner(ctx as unknown as RunnerServices, log)
       runner.setConfig(resolved)
       runner.start()
       log('chat-archive: runner started')
     } else {
-      holder.chatArchiveRunner.setConfig(resolved)
+      runner.setConfig(resolved)
     }
   } catch (error) {
     console.error('chat-archive: runner failed to start:', error)
@@ -105,7 +107,7 @@ export function apply(ctx: Context, userConfig?: Partial<ChatArchiveConfig>): vo
   }
 
   // Register the config JSON route exactly once (apply re-runs on every edit).
-  if (holder.chatArchiveRouteDone !== true) {
+  if (routeDone !== true) {
     const webServer = (ctx as { webServer?: RunnerServices['webServer'] }).webServer
     if (webServer !== undefined) {
       try {
@@ -113,10 +115,10 @@ export function apply(ctx: Context, userConfig?: Partial<ChatArchiveConfig>): vo
           kind: 'exact',
           path: CONFIG_ROUTE,
           handler: (req, res) => {
-            void handleConfigRoute(holder, req as import('node:http').IncomingMessage, res, rootCtx, log)
+            void handleConfigRoute(req as import('node:http').IncomingMessage, res, rootCtx, log)
           },
         })
-        holder.chatArchiveRouteDone = true
+        routeDone = true
         if (typeof disposer === 'function') {
           ctx.effect(() => disposer, 'chat-archive: config route disposal')
         }
@@ -130,13 +132,11 @@ export function apply(ctx: Context, userConfig?: Partial<ChatArchiveConfig>): vo
 
 /** Route handler: GET returns the current config, POST persists a new one. */
 async function handleConfigRoute(
-  holder: { chatArchiveRunner?: ChatArchiveRunner },
   req: import('node:http').IncomingMessage,
   res: ServerResponse,
   rootCtx: Context,
   log: (message: string) => void,
 ): Promise<void> {
-  const runner = holder.chatArchiveRunner
   const method = req.method ?? 'GET'
   try {
     if (method === 'GET') {
