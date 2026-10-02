@@ -39,7 +39,11 @@ const effectiveMs = Math.max(thresholdMs, intervalMinutes * 60_000)
 const cutoffMs = effectiveMs
 const now = Date.now()
 
-async function walk(dir, out) {
+function isSessionId(name) {
+  return name.startsWith('session-') || /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(name)
+}
+
+async function walk(dir, out, workspace) {
   let entries
   try {
     entries = await readdir(dir, { withFileTypes: true })
@@ -49,22 +53,21 @@ async function walk(dir, out) {
   for (const entry of entries) {
     if (entry.name === '.DS_Store') continue
     const full = join(dir, entry.name)
-    if (entry.isDirectory()) {
-      if (entry.name.startsWith('session-')) {
-        try {
-          const files = await readdir(full)
-          for (const file of files) {
-            if (!/^session\.jsonl(\.[a-z0-9]+)?$/.test(file)) continue
-            const info = await stat(join(full, file))
-            out.push({ id: entry.name, workspace: dir.split('/').pop(), path: join(full, file), activityMs: info.mtimeMs })
-            break
-          }
-        } catch {
-          // unreadable session dir — skip
+    if (!entry.isDirectory()) continue
+    if (isSessionId(entry.name)) {
+      try {
+        const files = await readdir(full)
+        for (const file of files) {
+          if (!/^session\.jsonl(\.[a-z0-9]+)?$/.test(file)) continue
+          const info = await stat(join(full, file))
+          out.push({ id: entry.name, workspace: workspace ?? dir.split('/').pop(), path: join(full, file), activityMs: info.mtimeMs })
+          break
         }
-      } else {
-        await walk(full, out)
+      } catch {
+        // unreadable session dir — skip
       }
+    } else {
+      await walk(full, out, entry.name)
     }
   }
   return out

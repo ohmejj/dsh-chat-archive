@@ -5,6 +5,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-10-02
+
+### Changed
+- 🔼 **适配 DeepSeek Harness 0.2.0 运行时**（CLI / Desktop / Web）：peerDependencies 更新为 `^0.2.0-rc.2` 系列（dsh-session / dsh-session-persistence / dsh-settings / dsh-workspace）。
+- 🧹 清理 0.4.x 遗留的调试 `console.log` 噪声，仅保留必要错误日志与功能汇总。
+
+### Fixed
+- 无（0.4.1 的行为保持不变，仅提升运行时兼容范围）。
+
+[0.5.0]: https://github.com/ohmejj/dsh-chat-archive/releases/tag/v0.5.0
+
+## [0.4.1] - 2026-09-14
+
+### Changed
+- 🔼 **适配 DeepSeek Harness 0.1.5**：peerDependencies 更新为 `^0.1.5-rc.x`（dsh-settings 提升至 `^0.1.5-rc.2`）。
+- ⚙️ **设置命名空间注册改为 `ctx.settings.installSection(...)`**（0.1.5 移除了自由函数 `installSettingsSection`/`settingsNamespace`），并在插件 inject 列表中加入 `settings` 服务。
+- 🎨 **客户端快照存储依赖迁移**：`@deepseek-ai/dsh-client-runtime`（已不再发布）→ `@deepseek-ai/dsh-client-store`，并同步更新 `dsh.client.inject`。
+
+### Fixed
+- 修复 settings.yaml 缺省 `unit`/`intervalMinutes` 字段时归档器无法启动的问题：`current()` 现在会正确地将部分配置与默认值合并。
+- `lastActivityMs()` 兼容 `.v3.jsonl` 与旧版 `.jsonl` 工件，文件缺失时优雅回退而不中断扫描。
+- 插件启动增加异常保护与诊断日志，避免因单个设置区块注册失败导致整个插件加载失败。
+
+### Added
+- 版本兼容性验证报告（`VERSION_COMPATIBILITY.md`）与 DSH profile 重建脚本（`fix-dsh-profile.sh`）。
+- `verify-install.sh` 一键安装验证脚本。
+
+[0.4.1]: https://github.com/ohmejj/dsh-chat-archive/releases/tag/v0.4.1
+
+## [0.4.0] - 2026-09-10
+
+### Changed
+- 🔼 **适配 DeepSeek Harness 0.1.5-rc.1（最新版）**：peerDependencies 更新为 `^0.1.5-rc.1`。
+
+[0.4.0]: https://github.com/ohmejj/dsh-chat-archive/releases/tag/v0.4.0
+
+## [0.3.1] - 2025-01-12
+
+### Fixed
+- Fixed configuration merge issue where missing `unit` and `intervalMinutes` fields in settings.yaml would prevent the archiver from starting
+- The `current()` method now properly merges partial configuration with default values
+
+[0.3.1]: https://github.com/ohmejj/dsh-chat-archive/compare/v0.3.0...v0.3.1
+
 ## [0.3.0] - 2025-01-09
 
 ### Added

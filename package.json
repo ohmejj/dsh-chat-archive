@@ -1,6 +1,6 @@
 {
   "name": "@ohmejj/dsh-chat-archive",
-  "version": "0.3.0",
+  "version": "0.5.0",
   "description": "DeepSeek Harness plugin: automatically archive idle conversations after a configurable threshold (hours/days), with its own Settings section UI.",
   "type": "module",
   "main": "./dist/index.js",
@@ -25,7 +25,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json && tsc -p tsconfig.client.json",
     "build:watch": "tsc -p tsconfig.json --watch",
-    "test": "npm run build && node --test tests/",
+    "test": "npm run build && node --test \"tests/*.test.mjs\"",
     "check": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
     "prepublishOnly": "npm run build"
   },
@@ -53,19 +53,40 @@
     "access": "public"
   },
   "devDependencies": {
+    "@deepseek-ai/dsh-app-boot": "^0.2.0-rc.2",
+    "@deepseek-ai/dsh-atomic-write": "^0.2.0-rc.2",
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.10.5",
+    "js-yaml": "^4.3.2",
     "typescript": "^5.7.3",
-    "@types/node": "^22.10.5"
+    "yaml": "^2.9.1"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.2",
-    "@deepseek-ai/dsh-session": "^0.1.1-rc.2",
-    "@deepseek-ai/dsh-session-persistence": "^0.1.1-rc.2",
-    "@deepseek-ai/dsh-settings": "^0.1.1-rc.2",
-    "@deepseek-ai/dsh-workspace": "^0.1.1-rc.2",
-    "@deepseek-ai/schemastery": "^3.18.2"
+    "@deepseek-ai/dsh-app-boot": "^0.2.0-rc.2",
+    "@deepseek-ai/dsh-atomic-write": "^0.2.0-rc.2",
+    "@deepseek-ai/dsh-session": "^0.2.0-rc.2",
+    "@deepseek-ai/dsh-session-persistence": "^0.2.0-rc.2",
+    "@deepseek-ai/dsh-settings": "^0.2.0-rc.2",
+    "@deepseek-ai/dsh-workspace": "^0.2.0-rc.2",
+    "@deepseek-ai/schemastery": "^3.18.2",
+    "js-yaml": "^4.3.2",
+    "yaml": "^2.9.1"
   },
   "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-app-boot": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-atomic-write": {
+      "optional": true
+    },
     "@deepseek-ai/dsh-session-persistence": {
+      "optional": true
+    },
+    "js-yaml": {
+      "optional": true
+    },
+    "yaml": {
       "optional": true
     }
   },
@@ -76,7 +97,7 @@
     "client": {
       "platform": "web",
       "inject": [
-        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-store",
         "@deepseek-ai/dsh-client-ui-settings"
       ]
     }

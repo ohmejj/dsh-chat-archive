@@ -54,13 +54,13 @@ export const UNIT_LABELS: Record<ArchiveUnit, string> = Object.freeze({
   days: '天 (days)',
 })
 
-/** Schema resolving the namespace (schemastery). */
+/** Schema resolving the namespace (schemastery). Only `.volatile()` fields are editable via the 0.2.0 SettingsForms form; non-volatile fields stay live-only/config-file. */
 export const configSchema = z.object({
-  enabled: z.boolean().default(false).description('启用自动归档'),
-  unit: z.union([z.const('minutes'), z.const('hours'), z.const('days')]).default('hours'),
-  threshold: z.number().step(1).min(1).default(72).description('闲置阈值'),
-  intervalMinutes: z.number().step(1).min(1).max(10080).default(30).description('扫描间隔（分钟）'),
-  runNowTick: z.number().step(1).min(0).default(0).hidden(),
+  enabled: z.boolean().default(false).description('启用自动归档').volatile(),
+  unit: z.union([z.const('minutes'), z.const('hours'), z.const('days')]).default('hours').volatile(),
+  threshold: z.number().step(1).min(1).default(72).description('闲置阈值').volatile(),
+  intervalMinutes: z.number().step(1).min(1).max(10080).default(30).description('扫描间隔（分钟）').volatile(),
+  runNowTick: z.number().step(1).min(0).default(0).hidden().volatile(),
 })
 
 /** Idle duration that triggers archiving, in milliseconds. */

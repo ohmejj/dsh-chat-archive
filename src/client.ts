@@ -22,6 +22,7 @@
 declare const window: any
 declare const document: any
 declare const setTimeout: (callback: () => void, delayMs: number) => any
+declare const fetch: (input: string, init?: any) => Promise<any>
 
 /** Structural settings-scope snapshot used by the section. */
 interface ScopeSnapshot {
@@ -79,7 +80,7 @@ interface SectionState {
 function dshChatArchiveClientFactory(requireFn: (id: string) => any): Record<string, unknown> {
   const module = { exports: {} as Record<string, unknown> }
   const React = requireFn('react')
-  const { createSnapshotStore } = requireFn('@deepseek-ai/dsh-client-runtime/client')
+  const { createSnapshotStore } = requireFn('@deepseek-ai/dsh-client-store')
 
   // ── styles (injected once per page; tokens follow the app's design vars) ──
   const css = [
@@ -184,10 +185,7 @@ function dshChatArchiveClientFactory(requireFn: (id: string) => any): Record<str
     discard: 'Discard',
     readOnly: 'This connection is read-only.',
   }
-  const lang: 'zh' | 'en' =
-    typeof document !== 'undefined' && typeof document.documentElement.lang === 'string' && document.documentElement.lang.toLowerCase().startsWith('zh')
-      ? 'zh'
-      : 'en'
+  const lang: 'zh' | 'en' = 'zh'  // 强制使用中文
   const t = (key: string): string => (lang === 'zh' ? zh[key] : en[key]) ?? key
 
   // ── field specs ──
@@ -600,10 +598,86 @@ function dshChatArchiveClientFactory(requireFn: (id: string) => any): Record<str
 
   // ── plugin body ──
   const SETTINGS_NAMESPACE = 'chat-archive'
-  const inject = ['slots', 'settingsScope']
+  const CONFIG_ROUTE = '/api/plugins/chat-archive/config'
+  // The Host serves this page from the same web server that owns the route, so
+  // a same-origin absolute path always targets it (also under auth reverse proxies).
+  const configUrl = (): string => {
+    const base = window?.location?.origin ?? ''
+    return base + CONFIG_ROUTE
+  }
 
-  function apply(ctx: { slots: any; settingsScope: { bind(spec: { namespace: string }): SettingsScopeLike } }): void {
-    const controller = new FormController(ctx.settingsScope.bind({ namespace: SETTINGS_NAMESPACE }), [
+  /**
+   * Settings-scope over the host's JSON config route.
+   *
+   * chat-archive is a `- insert:` plugin: the 0.2.0 SettingsForms only serves
+   * Include-entry plugins, so there is no generic settings namespace to bind.
+   * This scope loads the current config from GET configUrl() and persists a
+   * full override row to the profile's cordis.patch.yml via POST configUrl().
+   * The host reconciles the profile after each write, re-running apply() with
+   * the new config — so every save (and the "Archive now" tick bump) fires a
+   * scan.
+   */
+  function createHttpScope(): SettingsScopeLike {
+    const listeners = new Set<() => void>()
+    let snapshot: ScopeSnapshot = { status: 'loading', writable: true }
+    let current: Record<string, unknown> = {}
+
+    const publish = (): void => {
+      for (const listener of Array.from(listeners)) {
+        try {
+          listener()
+        } catch {
+          // a failing listener must not break the scope
+        }
+      }
+    }
+
+    const refresh = async (): Promise<void> => {
+      try {
+        const response = await fetch(configUrl(), { method: 'GET', headers: { Accept: 'application/json' } })
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        current = (await response.json()) as Record<string, unknown>
+        snapshot = { status: 'ready', value: current, base: current, user: current, writable: true }
+      } catch {
+        snapshot = { status: 'unavailable', writable: false }
+      }
+      publish()
+    }
+
+    const persist = async (overrides: Record<string, unknown>): Promise<void> => {
+      const next = { ...current, ...overrides }
+      const response = await fetch(configUrl(), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(next) })
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      current = next
+      snapshot = { status: 'ready', value: current, base: current, user: current, writable: true }
+      publish()
+    }
+
+    void refresh()
+
+    return {
+      getSnapshot: () => snapshot,
+      subscribe: (listener) => {
+        listeners.add(listener)
+        return () => listeners.delete(listener)
+      },
+      set: async (field, value) => {
+        await persist({ [field]: value })
+      },
+      unset: async (field) => {
+        // With a full-config override we cannot "remove" one key in place; the
+        // host builds the row from whatever we post, so reset means restore the
+        // safe default for that field.
+        const defaults: Record<string, unknown> = { enabled: false, unit: 'hours', threshold: 72, intervalMinutes: 30 }
+        if (field in defaults) await persist({ [field]: defaults[field] })
+      },
+    }
+  }
+
+  const inject = ['slots']
+
+  function apply(ctx: { slots: any; settingsScope: any }): void {
+    const controller = new FormController(createHttpScope(), [
       booleanField('enabled'),
       unitField('unit'),
       integerField('threshold'),

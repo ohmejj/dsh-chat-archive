@@ -37,3 +37,6 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+
+# npm 打包产物
+*.tgz
