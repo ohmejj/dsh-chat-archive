@@ -37,8 +37,10 @@ interface ScopeSnapshot {
 interface SettingsScopeLike {
   getSnapshot(): ScopeSnapshot
   subscribe(listener: () => void): () => void
+  replace(value: Record<string, unknown>): Promise<void>
   set(field: string, value: unknown): Promise<void>
   unset(field: string): Promise<void>
+  runNow(): Promise<{ archived: unknown[]; recent: unknown[]; live: unknown[] }>
 }
 
 /** One field's wire format + parse rules. */
@@ -136,11 +138,11 @@ function dshChatArchiveClientFactory(requireFn: (id: string) => any): Record<str
   const zh: Record<string, string> = {
     nav: '对话自动归档',
     title: '对话自动归档',
-    description: '闲置超过阈值的会话自动进入 DSH 归档集（数据保留，可恢复）。',
+    description: '闲置超过阈值的会话自动进入 DSH 归档集（数据保留，可恢复；活跃会话达到阈值时会先停止再归档）。',
     enabled: '启用自动归档',
-    enabledHint: '关闭后不执行任何扫描与归档。',
+    enabledHint: '关闭后不再按计划扫描；仍可使用“立即归档”手动执行一次。',
     threshold: '闲置超过以下时长即归档',
-    thresholdHint: '以会话最后一次活动（持久化日志写入时间）为准；正在运行的会话不会被归档。',
+    thresholdHint: '以最后一条真实会话事件时间为准，恢复标记不会重置计时；运行中的会话达到阈值时会被停止并归档。',
     thresholdUnitHint: '单位支持：分钟 / 小时 / 天。',
     unitMinutes: '分钟',
     unitHours: '小时',
@@ -149,7 +151,8 @@ function dshChatArchiveClientFactory(requireFn: (id: string) => any): Record<str
     interval: '扫描间隔（分钟）',
     intervalHint: 'Host 每隔这么多分钟检查一次（1–10080）。会话须连续闲置满“阈值与间隔中的较大值”才会被归档——即最近一个完整扫描间隔内没有任何对话。',
     runNow: '立即归档',
-    ran: '已触发一次归档扫描',
+    ran: '扫描完成：已归档 {archived} 个，未到阈值 {recent} 个，活跃会话 {live} 个。',
+    runFailed: '立即归档失败，请稍后重试',
     saved: '已保存，立即生效',
     overridden: '已覆盖',
     reset: '重置',
@@ -162,11 +165,11 @@ function dshChatArchiveClientFactory(requireFn: (id: string) => any): Record<str
   const en: Record<string, string> = {
     nav: 'Auto-archive conversations',
     title: 'Auto-archive conversations',
-    description: 'Sessions idle past the threshold move into the DSH archive set (data retained, recoverable).',
+    description: 'Sessions idle past the threshold move into the DSH archive set (data retained, recoverable; live sessions are stopped before archiving).',
     enabled: 'Enable automatic archiving',
-    enabledHint: 'When off, no scan or archive ever runs.',
+    enabledHint: 'When off, scheduled scans stop; “Archive now” still runs one manual scan.',
     threshold: 'Archive after this much inactivity',
-    thresholdHint: "Measured from the session's last activity (durable log write); running sessions are never archived.",
+    thresholdHint: 'Measured from the last real conversation event; recovery markers do not reset the timer. Running sessions are stopped and archived after the threshold.',
     thresholdUnitHint: 'Unit: minutes / hours / days.',
     unitMinutes: 'minutes',
     unitHours: 'hours',
@@ -175,7 +178,8 @@ function dshChatArchiveClientFactory(requireFn: (id: string) => any): Record<str
     interval: 'Scan interval (minutes)',
     intervalHint: 'How often the Host re-scans (1–10080). A session is archived only after it has been continuously idle for max(threshold, one full interval) — i.e. no conversation during the most recent scan interval.',
     runNow: 'Archive now',
-    ran: 'Archive scan triggered',
+    ran: 'Scan complete — archived {archived}; below threshold {recent}; active {live}.',
+    runFailed: 'Archive now failed. Please try again.',
     saved: 'Saved — active immediately',
     overridden: 'Overridden',
     reset: 'Reset',
@@ -265,7 +269,7 @@ function dshChatArchiveClientFactory(requireFn: (id: string) => any): Record<str
       }
     }
 
-    actions(): { edit: (field: string, text: string) => void; resetField: (field: string) => void; save: () => Promise<void>; discard: () => void; runNow: () => Promise<void> } {
+    actions(): { edit: (field: string, text: string) => void; resetField: (field: string) => void; save: () => Promise<void>; discard: () => void; runNow: () => Promise<{ archived: unknown[]; recent: unknown[]; live: unknown[] }> } {
       return {
         edit: (field: string, text: string) => this.stage(field, { text, clear: false }),
         resetField: (field: string) => {
@@ -337,18 +341,16 @@ function dshChatArchiveClientFactory(requireFn: (id: string) => any): Record<str
       const plan = this.plan()
       const writes = plan.filter((item) => item.run !== undefined)
       if (plan.length === 0 || this.saving || writes.length !== plan.length) return
+      const next = this.nextConfig()
+      if (next === undefined) return
       this.saving = true
       this.failed = false
       this.publish()
       let landed = true
-      let chain: Promise<void> = Promise.resolve()
-      for (const item of writes) {
-        chain = chain.then(item.run).then((ok: boolean) => {
-          landed = ok && landed
-        })
-      }
       try {
-        await chain
+        // A profile write reloads this plugin.  Commit every staged field in
+        // one request so a reload cannot interrupt a later field write.
+        await this.scope.replace(next)
       } catch {
         landed = false
       }
@@ -358,6 +360,34 @@ function dshChatArchiveClientFactory(requireFn: (id: string) => any): Record<str
       this.publish()
     }
 
+    /** Build the full config to persist, including resets to safe defaults. */
+    private nextConfig(): Record<string, unknown> | undefined {
+      const current = this.scope.getSnapshot().value ?? {}
+      const next: Record<string, unknown> = { ...current }
+      const defaults: Record<FieldKey, unknown> = {
+        enabled: false,
+        unit: 'hours',
+        threshold: 72,
+        intervalMinutes: 30,
+      }
+      for (const [field, draft] of Array.from(this.staged.entries())) {
+        const spec = this.specs.get(field)
+        if (spec === undefined) continue
+        if (draft.clear) {
+          if (field in defaults) next[field] = defaults[field as FieldKey]
+          continue
+        }
+        const write = spec.parse(draft.text)
+        if (write === undefined) return undefined
+        if (write.kind === 'clear') {
+          if (field in defaults) next[field] = defaults[field as FieldKey]
+        } else {
+          next[field] = write.value
+        }
+      }
+      return next
+    }
+
     private discard(): void {
       if (this.staged.size === 0 && !this.failed) return
       this.staged.clear()
@@ -365,11 +395,9 @@ function dshChatArchiveClientFactory(requireFn: (id: string) => any): Record<str
       this.publish()
     }
 
-    /** Bump the host-visible runNowTick; the Host scans on the committed change. */
-    private async runNow(): Promise<void> {
-      const current = this.scope.getSnapshot().value
-      const tick = typeof current?.runNowTick === 'number' ? current.runNowTick : 0
-      await this.scope.set('runNowTick', tick + 1)
+    /** Call the Host's dedicated manual-scan route and return its real outcome. */
+    private async runNow(): Promise<{ archived: unknown[]; recent: unknown[]; live: unknown[] }> {
+      return await this.scope.runNow()
     }
 
     private publish(): void {
@@ -505,12 +533,13 @@ function dshChatArchiveClientFactory(requireFn: (id: string) => any): Record<str
     useChatArchive: (selector: (state: SectionState) => unknown) => SectionState
     save: () => Promise<void>
     discard: () => void
-    runNow: () => Promise<void>
+    runNow: () => Promise<{ archived: unknown[]; recent: unknown[]; live: unknown[] }>
     edit: (field: string, text: string) => void
     resetField: (field: string) => void
   }) {
     const state = props.useChatArchive((snapshot: SectionState) => snapshot)
-    const [ran, setRan] = React.useState(false)
+    const [runMessage, setRunMessage] = React.useState(null as string | null)
+    const [runFailed, setRunFailed] = React.useState(false)
     const [saved, setSaved] = React.useState(false)
     if (!state.available) return null
     const writable = state.writable
@@ -529,12 +558,17 @@ function dshChatArchiveClientFactory(requireFn: (id: string) => any): Record<str
     }
     const onRunNow = (): void => {
       props.runNow().then(
-        () => {
-          setRan(true)
-          setTimeout(() => setRan(false), 4000)
+        (outcome) => {
+          setRunFailed(false)
+          setRunMessage(t('ran')
+            .replace('{archived}', String(outcome.archived.length))
+            .replace('{recent}', String(outcome.recent.length))
+            .replace('{live}', String(outcome.live.length)))
+          setTimeout(() => setRunMessage(null), 5000)
         },
         () => {
-          /* write refused — nothing to show beyond the failed banner state */
+          setRunFailed(true)
+          setTimeout(() => setRunFailed(false), 5000)
         },
       )
     }
@@ -584,7 +618,8 @@ function dshChatArchiveClientFactory(requireFn: (id: string) => any): Record<str
           React.createElement(
             'div',
             { className: 'dsac_footer' },
-            ran ? React.createElement('p', { className: 'dsac_ran', role: 'status' }, t('ran')) : null,
+            runMessage !== null ? React.createElement('p', { className: 'dsac_ran', role: 'status' }, runMessage) : null,
+            runFailed ? React.createElement('p', { className: 'dsac_failed', role: 'status' }, t('runFailed')) : null,
             saved ? React.createElement('p', { className: 'dsac_ran', role: 'status' }, t('saved')) : null,
             state.failed ? React.createElement('p', { className: 'dsac_failed', role: 'status' }, t('saveFailed')) : null,
             React.createElement(Button, { kind: 'run', disabled: !writable || state.saving, onClick: onRunNow, children: t('runNow') }),
@@ -599,6 +634,7 @@ function dshChatArchiveClientFactory(requireFn: (id: string) => any): Record<str
   // ── plugin body ──
   const SETTINGS_NAMESPACE = 'chat-archive'
   const CONFIG_ROUTE = '/api/plugins/chat-archive/config'
+  const RUN_ROUTE = '/api/plugins/chat-archive/run'
   // The Host serves this page from the same web server that owns the route, so
   // a same-origin absolute path always targets it (also under auth reverse proxies).
   const configUrl = (): string => {
@@ -644,8 +680,7 @@ function dshChatArchiveClientFactory(requireFn: (id: string) => any): Record<str
       publish()
     }
 
-    const persist = async (overrides: Record<string, unknown>): Promise<void> => {
-      const next = { ...current, ...overrides }
+    const persist = async (next: Record<string, unknown>): Promise<void> => {
       const response = await fetch(configUrl(), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(next) })
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
       current = next
@@ -661,15 +696,28 @@ function dshChatArchiveClientFactory(requireFn: (id: string) => any): Record<str
         listeners.add(listener)
         return () => listeners.delete(listener)
       },
+      replace: async (value) => {
+        await persist(value)
+      },
       set: async (field, value) => {
-        await persist({ [field]: value })
+        await persist({ ...current, [field]: value })
       },
       unset: async (field) => {
         // With a full-config override we cannot "remove" one key in place; the
         // host builds the row from whatever we post, so reset means restore the
         // safe default for that field.
         const defaults: Record<string, unknown> = { enabled: false, unit: 'hours', threshold: 72, intervalMinutes: 30 }
-        if (field in defaults) await persist({ [field]: defaults[field] })
+        if (field in defaults) await persist({ ...current, [field]: defaults[field] })
+      },
+      runNow: async () => {
+        const response = await fetch((window?.location?.origin ?? '') + RUN_ROUTE, { method: 'POST', headers: { Accept: 'application/json' } })
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        const payload = await response.json() as { outcome?: { archived?: unknown[]; recent?: unknown[]; live?: unknown[] } }
+        return {
+          archived: payload.outcome?.archived ?? [],
+          recent: payload.outcome?.recent ?? [],
+          live: payload.outcome?.live ?? [],
+        }
       },
     }
   }
@@ -690,8 +738,11 @@ function dshChatArchiveClientFactory(requireFn: (id: string) => any): Record<str
       threshold: controller.fieldView('threshold'),
       intervalMinutes: controller.fieldView('intervalMinutes'),
     }))
-    ctx.slots.inject('settings.section', function* () {
-      yield ctx.slots.register(
+    // `slots.inject()` expects a normal callback that returns the registration
+    // disposer.  A generator here is ignored by the current DSH slot runtime,
+    // which was why the Settings entry never appeared.
+    ctx.slots.inject('settings.section', () =>
+      ctx.slots.register(
         {
           name: 'settings.section',
           id: 'chat-archive',
@@ -703,8 +754,8 @@ function dshChatArchiveClientFactory(requireFn: (id: string) => any): Record<str
           }),
         },
         ChatArchiveSection,
-      )
-    })
+      ),
+    )
   }
 
   module.exports.apply = apply

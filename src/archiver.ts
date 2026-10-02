@@ -11,11 +11,10 @@
  *     (the card's “Archive now” writes a higher tick through the generic
  *     SettingsForms writer, which re-runs the plugin with the new config).
  *
- * Only NON-live sessions are ever archived, and only sessions the workspace
- * registry does not already hold in its archive set — so this is idempotent
- * and never hides a conversation that is currently running.
+ * Sessions crossing the threshold are archived even if live. DSH's native
+ * `stopActivity` mode writes the reversible archive marker first, then stops
+ * any in-flight work so it cannot resume after archival.
  */
-import { stat } from 'node:fs/promises'
 import type { SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import { type ChatArchiveConfig, DEFAULT_CONFIG, effectiveIdleMs } from './config.js'
 import { decideArchivable, type SessionActivity } from './scan.js'
@@ -24,11 +23,14 @@ import { decideArchivable, type SessionActivity } from './scan.js'
 export interface RunnerServices {
   sessionPersistence: {
     list(signal?: AbortSignal): Promise<readonly { header: SessionHeader; revision: unknown; sizeBytes?: number }[]>
-    locate(meta: SessionHeader): { kind: string; path: string } | undefined
+    open(sessionId: SessionId, mode: 'read'): Promise<{
+      read(): Promise<{ events: readonly { type: string; time: number }[] }>
+      close(): Promise<void>
+    }>
   }
   workspaceRegistry: {
     readonly archivedSessionIds: readonly SessionId[]
-    archiveSession(sessionId: SessionId): Promise<void>
+    archiveSession(sessionId: SessionId, options?: { stopActivity?: boolean }): Promise<void>
   }
   sessions: {
     get(sessionId: SessionId): unknown
@@ -53,50 +55,20 @@ export interface ScanOutcome {
   live: unknown[]
 }
 
+/** Read-only progress state for the manual-scan endpoint and diagnostics. */
+export interface ScanStatus {
+  scanning: boolean
+  phase: 'idle' | 'listing' | 'classifying' | 'archiving' | 'complete' | 'failed'
+  currentSessionId?: string
+  lastError?: string
+  lastOutcome?: ScanOutcome
+}
+
 const MS = 1000
 const INITIAL_SCAN_DELAY_MS = 3 * MS
 
-/**
- * Expand a located session path into the set of on-disk artifact variants the
- * DSH session store may actually use. The store has changed backends across
- * versions (`.jsonl`, `.v3.jsonl`, `.v4.jsonl`, and current zstd-compressed
- * `.jsonl.zstd` / `.v3.jsonl.zstd` / `.v4.jsonl.zstd`), and `locate` may point
- * at a path the on-disk file doesn't match exactly. We try the primary then
- * each plausible variant so a renamed/compressed artifact still yields its
- * mtime (the real activity signal).
- */
-function candidates(path: string): string[] {
-  const out = new Set<string>([path])
-  // strip compression and version to get a bare fragment, then re-add variants
-  const bare = path.replace(/\.v\d+\.jsonl(\.zstd)?$/, '').replace(/\.jsonl(\.zstd)?$/, '')
-  if (bare !== path) {
-    for (const suffix of ['.jsonl', '.v3.jsonl', '.v4.jsonl', '.jsonl.zstd', '.v3.jsonl.zstd', '.v4.jsonl.zstd']) {
-      out.add(bare + suffix)
-    }
-  }
-  return Array.from(out)
-}
-
-/** Return the mtime of the first existing candidate, else undefined. */
-async function statOneOf(paths: string[]): Promise<number | undefined> {
-  let lastError: unknown
-  for (const p of paths) {
-    try {
-      const info = await stat(p)
-      return info.mtimeMs
-    } catch (error: any) {
-      if (error?.code === 'ENOENT') {
-        lastError = error
-        continue
-      }
-      throw error
-    }
-  }
-  // All variants missing: inspect the containing dir to avoid spurious errors
-  // if the session simply has no artifact yet (fresh) — treated as "no mtime".
-  void lastError
-  return undefined
-}
+/** DSH lifecycle records that can be appended by resume/recovery without a conversation. */
+const NON_CONVERSATIONAL_EVENTS = new Set(['session/end-seed'])
 
 /** Human summary for logs. */
 function summary(outcome: ScanOutcome): string {
@@ -110,7 +82,7 @@ export class ChatArchiveRunner {
   private initialTimer: ReturnType<typeof setTimeout> | null = null
   private scanning = false
   private disposed = false
-  private lastRunNowTick = DEFAULT_CONFIG.runNowTick
+  private scanStatus: ScanStatus = { scanning: false, phase: 'idle' }
 
   constructor(
     private readonly ctx: RunnerServices,
@@ -125,18 +97,24 @@ export class ChatArchiveRunner {
     return { ...DEFAULT_CONFIG, ...resolved }
   }
 
+  /** Snapshot of the active or most recently completed scan. */
+  status(): ScanStatus {
+    return {
+      ...this.scanStatus,
+      ...this.scanStatus.lastOutcome === undefined ? {} : { lastOutcome: this.scanStatus.lastOutcome },
+    }
+  }
+
   /**
    * Feed the resolved configuration. Called by the plugin entry on every
    * `apply(ctx, config)` — i.e. on boot and on every committed config edit —
    * so a `runNowTick` bump (the card's “Archive now”) triggers one scan.
    */
-  setConfig(config: ChatArchiveConfig): void {
+  setConfig(config: ChatArchiveConfig, manual = false): void {
     this.source = () => config
-    const manual = config.runNowTick > this.lastRunNowTick
-    this.lastRunNowTick = Math.max(this.lastRunNowTick, config.runNowTick)
     if (this.disposed) return
     this.rearm(config)
-    void this.runScan(manual ? 'manual' : 'config-change')
+    void this.runScan(manual ? 'manual' : 'config-change', { allowWhenDisabled: manual })
   }
 
   /** Mount everything: initial scan (on boot config is set before start). */
@@ -162,14 +140,15 @@ export class ChatArchiveRunner {
   }
 
   /** One full scan: list → stat → decide → archive. */
-  async runScan(trigger: string): Promise<ScanOutcome | null> {
+  async runScan(trigger: string, options: { allowWhenDisabled?: boolean } = {}): Promise<ScanOutcome | null> {
     const config = this.current()
-    if (!config.enabled) {
+    if (!config.enabled && !options.allowWhenDisabled) {
       this.log('chat-archive: archiver disabled — skipping scan')
       return null
     }
     if (this.scanning) return null
     this.scanning = true
+    this.scanStatus = { scanning: true, phase: 'listing' }
     try {
       const now = Date.now()
       // idle ≥ max(threshold, one full scan interval): never archive a session
@@ -178,6 +157,7 @@ export class ChatArchiveRunner {
       const archivedIds = new Set<unknown>(this.ctx.workspaceRegistry.archivedSessionIds)
       const snapshots = await this.ctx.sessionPersistence.list()
       if (this.disposed) return null
+      this.scanStatus = { ...this.scanStatus, phase: 'classifying' }
       const activities: SessionActivity[] = []
       const liveIds = new Set<unknown>()
       const liveList: unknown[] = []
@@ -187,15 +167,17 @@ export class ChatArchiveRunner {
         if (this.ctx.sessions.get(header.id) !== undefined) {
           liveIds.add(header.id)
           liveList.push(header.id)
-          continue
         }
         activities.push({ id: header.id, activityMs: await this.lastActivityMs(header) })
       }
-      const decision = decideArchivable(activities, archivedIds, liveIds, cutoff)
+      // Do not exclude active sessions: selected live sessions use the
+      // workspace registry's native archive-then-stop protocol below.
+      const decision = decideArchivable(activities, archivedIds, new Set(), cutoff)
       for (const id of decision.selected) {
         if (this.disposed) break
+        this.scanStatus = { ...this.scanStatus, phase: 'archiving', currentSessionId: String(id) }
         try {
-          await this.ctx.workspaceRegistry.archiveSession(id as SessionId)
+          await this.ctx.workspaceRegistry.archiveSession(id as SessionId, liveIds.has(id) ? { stopActivity: true } : undefined)
         } catch (error) {
           console.error(`chat-archive: archiveSession failed for ${String(id)}:`, error)
           this.log(`chat-archive: archiveSession failed for ${String(id)}: ${String(error)}`)
@@ -209,24 +191,44 @@ export class ChatArchiveRunner {
         live: liveList,
       }
       this.log(`chat-archive: ${summary(outcome)}${decision.selected.length > 0 ? ` (${decision.selected.join(', ')})` : ''}`)
+      this.scanStatus = { scanning: false, phase: 'complete', lastOutcome: outcome }
       return outcome
     } catch (error) {
-      this.log(`chat-archive: scan failed: ${String(error)}`)
+      const message = String(error)
+      this.log(`chat-archive: scan failed: ${message}`)
+      this.scanStatus = { scanning: false, phase: 'failed', lastError: message }
       return null
     } finally {
       this.scanning = false
+      if (this.scanStatus.scanning) this.scanStatus = { ...this.scanStatus, scanning: false, phase: 'idle', currentSessionId: undefined }
     }
   }
 
-  /** Last durable activity of one session = mtime of its backend artifact. */
+  /**
+   * Last activity is the newest durable conversation event, not the log file
+   * mtime. DSH may append a `session/end-seed` recovery marker while reopening
+   * a days-old conversation; using mtime would falsely make that conversation
+   * look recent and prevent it from being archived.
+   */
   private async lastActivityMs(header: SessionHeader): Promise<number | undefined> {
+    let handle: Awaited<ReturnType<RunnerServices['sessionPersistence']['open']>> | undefined
     try {
-      const location = this.ctx.sessionPersistence.locate(header)
-      if (location === undefined) return undefined
-      return await statOneOf(candidates(location.path))
+      handle = await this.ctx.sessionPersistence.open(header.id, 'read')
+      const { events } = await handle.read()
+      for (let index = events.length - 1; index >= 0; index -= 1) {
+        const event = events[index]
+        if (!NON_CONVERSATIONAL_EVENTS.has(event.type) && Number.isFinite(event.time)) return event.time
+      }
+      return header.createdAt
     } catch (error) {
-      console.error(`chat-archive: failed to get mtime for session ${String(header.id)}:`, error)
+      console.error(`chat-archive: failed to read activity for session ${String(header.id)}:`, error)
       return undefined
+    } finally {
+      try {
+        await handle?.close()
+      } catch (error) {
+        console.error(`chat-archive: failed to close session reader for ${String(header.id)}:`, error)
+      }
     }
   }
 
