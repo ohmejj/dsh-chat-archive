@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.3] - 2026-10-02
+
+### Fixed
+- 🐛 **修复设置卡片空白与保存失败**：配置 schema 上所有字段的 `.volatile()` 会使 DSH 0.2.0 的 schemastery 把每个解析值包装成 `Volatile` 引用对象（`{enabled:{}}`），JSON 序列化后变成空对象——导致设置面板展示不出默认配置、保存时抛 `Cannot read properties of undefined (reading 'length')`。移除 volatile 包装，字段恢复为普通标量，GET 正常返回默认值、POST 正常写回 profile patch。
+
+[0.5.3]: https://github.com/ohmejj/dsh-chat-archive/releases/tag/v0.5.3
+
 ## [0.5.2] - 2026-10-02
 
 ### Fixed
