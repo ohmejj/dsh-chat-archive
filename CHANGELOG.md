@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] - 2026-10-02
+
+### Fixed
+- 🐛 **修复 0.2.0 会话 mtime 检测**：DSH 0.2.0 会话存储使用 zstd 压缩（`.v3.jsonl.zstd` / `.v4.jsonl.zstd`），旧回退逻辑只能处理未压缩的 `.jsonl`/`.v3.jsonl`，导致这些会话无法判定空闲状态而被跳过归档。新增候选路径展开（自动匹配 `.jsonl`、`.vN.jsonl`、`.jsonl.zstd`、`.vN.jsonl.zstd` 变体），恢复对各会话格式的 mtime 检测。
+
+[0.5.2]: https://github.com/ohmejj/dsh-chat-archive/releases/tag/v0.5.2
+
 ## [0.5.1] - 2026-10-02
 
 ### Fixed
