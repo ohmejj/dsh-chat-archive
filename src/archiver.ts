@@ -1,22 +1,23 @@
 /**
  * Host runner of the chat-archive plugin.
  *
- * Wires three things together:
- *  1. the settings namespace (registering it makes the resolved section the
- *     authoritative configuration AND lets the browser card edit it);
+ * Wires two things together:
+ *  1. a resolved configuration source (provided by the plugin entry, which
+ *     reads it from the profile row's `config:` via cordis's `apply(ctx,
+ *     config)` — the 0.2.0-native settings model);
  *  2. a periodic scan over durable sessions (idle > threshold → archive via
  *     the workspace registry — DSH's native, reversible archive set);
- *  3. immediate scans on every committed config change and on the card's
- *     “Archive now” request (a runNowTick bump).
+ *  3. an immediate scan when the configuration's `runNowTick` has been bumped
+ *     (the card's “Archive now” writes a higher tick through the generic
+ *     SettingsForms writer, which re-runs the plugin with the new config).
  *
  * Only NON-live sessions are ever archived, and only sessions the workspace
  * registry does not already hold in its archive set — so this is idempotent
  * and never hides a conversation that is currently running.
  */
 import { stat } from 'node:fs/promises'
-import type { SettingsProvider } from '@deepseek-ai/dsh-settings'
 import type { SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
-import { type ChatArchiveConfig, DEFAULT_CONFIG, SETTINGS_NAMESPACE, configSchema, effectiveIdleMs, validateConfig } from './config.js'
+import { type ChatArchiveConfig, DEFAULT_CONFIG, effectiveIdleMs } from './config.js'
 import { decideArchivable, type SessionActivity } from './scan.js'
 
 /** Structural slice of the Host context this runner needs. */
@@ -32,7 +33,13 @@ export interface RunnerServices {
   sessions: {
     get(sessionId: SessionId): unknown
   }
-  settings: SettingsProvider
+  webServer?: {
+    register(route: {
+      kind: 'exact' | 'prefix'
+      path: string
+      handler: (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => void | Promise<void>
+    }): () => void
+  }
   effect<T>(fn: (() => T | void), label?: string): T | void
   on<K extends string>(event: K, listener: (...args: any[]) => void): () => void
 }
@@ -70,52 +77,31 @@ export class ChatArchiveRunner {
     this.ctx.effect(() => () => this.dispose(), 'chat-archive: runner disposal')
   }
 
-  /** Current authoritative configuration (settings section when attached). */
+  /** Current authoritative configuration (provided by the plugin entry). */
   current(): ChatArchiveConfig {
     const resolved = this.source() ?? DEFAULT_CONFIG
     return { ...DEFAULT_CONFIG, ...resolved }
   }
 
-  /** Mount everything: settings namespace + initial scan. */
+  /**
+   * Feed the resolved configuration. Called by the plugin entry on every
+   * `apply(ctx, config)` — i.e. on boot and on every committed config edit —
+   * so a `runNowTick` bump (the card's “Archive now”) triggers one scan.
+   */
+  setConfig(config: ChatArchiveConfig): void {
+    this.source = () => config
+    const manual = config.runNowTick > this.lastRunNowTick
+    this.lastRunNowTick = Math.max(this.lastRunNowTick, config.runNowTick)
+    if (this.disposed) return
+    this.rearm(config)
+    void this.runScan(manual ? 'manual' : 'config-change')
+  }
+
+  /** Mount everything: initial scan (on boot config is set before start). */
   start(): void {
-    console.log('chat-archive: start() called')
-    try {
-      console.log('chat-archive: calling installSection...')
-      this.ctx.settings.installSection(
-        this.ctx as never,
-        SETTINGS_NAMESPACE,
-        configSchema as never,
-        DEFAULT_CONFIG,
-        {
-          validate: validateConfig,
-          setSource: (next: () => ChatArchiveConfig) => {
-            console.log('chat-archive: setSource called')
-            this.source = next
-          },
-          onChange: () => {
-            console.log('chat-archive: onChange triggered')
-            if (this.disposed) return
-            const config = this.current()
-            this.rearm(config)
-            // A bumped runNowTick is the card's explicit “Archive now”.
-            const manual = config.runNowTick > this.lastRunNowTick
-            if (manual) this.lastRunNowTick = config.runNowTick
-            console.log(`chat-archive: scheduling scan (trigger: ${manual ? 'manual' : 'config-change'})`)
-            void this.runScan(manual ? 'manual' : 'config-change')
-          },
-        },
-      )
-      console.log('chat-archive: installSection completed')
-      this.log('chat-archive: settings section registered; archiver started')
-    } catch (error) {
-      console.error('chat-archive: installSection failed:', error)
-      this.log(`chat-archive: failed to register settings section: ${String(error)}`)
-    }
     // Catch up on inactivity that accumulated while this profile was down.
-    console.log('chat-archive: scheduling initial scan')
     this.initialTimer = setTimeout(() => {
       this.initialTimer = null
-      console.log('chat-archive: running initial boot scan')
       void this.runScan('boot')
     }, INITIAL_SCAN_DELAY_MS)
   }
@@ -135,30 +121,20 @@ export class ChatArchiveRunner {
 
   /** One full scan: list → stat → decide → archive. */
   async runScan(trigger: string): Promise<ScanOutcome | null> {
-    console.log(`chat-archive: runScan called (trigger: ${trigger})`)
     const config = this.current()
-    console.log(`chat-archive: config - enabled: ${config.enabled}, threshold: ${config.threshold} ${config.unit}`)
     if (!config.enabled) {
       this.log('chat-archive: archiver disabled — skipping scan')
-      console.log('chat-archive: archiver disabled — skipping scan')
       return null
     }
-    if (this.scanning) {
-      console.log('chat-archive: scan already in progress — skipping')
-      return null
-    }
+    if (this.scanning) return null
     this.scanning = true
-    console.log('chat-archive: starting scan execution...')
     try {
       const now = Date.now()
       // idle ≥ max(threshold, one full scan interval): never archive a session
       // that conversed during the most recent interval.
       const cutoff = now - effectiveIdleMs(config)
-      console.log(`chat-archive: cutoff time: ${new Date(cutoff).toISOString()}`)
       const archivedIds = new Set<unknown>(this.ctx.workspaceRegistry.archivedSessionIds)
-      console.log(`chat-archive: fetching session list...`)
       const snapshots = await this.ctx.sessionPersistence.list()
-      console.log(`chat-archive: found ${snapshots.length} total sessions`)
       if (this.disposed) return null
       const activities: SessionActivity[] = []
       const liveIds = new Set<unknown>()
@@ -173,13 +149,10 @@ export class ChatArchiveRunner {
         }
         activities.push({ id: header.id, activityMs: await this.lastActivityMs(header) })
       }
-      console.log(`chat-archive: ${activities.length} sessions to evaluate, ${liveList.length} live sessions`)
       const decision = decideArchivable(activities, archivedIds, liveIds, cutoff)
-      console.log(`chat-archive: decision - ${decision.selected.length} to archive, ${decision.recent.length} recent, ${decision.undeterminable.length} undeterminable`)
       for (const id of decision.selected) {
         if (this.disposed) break
         try {
-          console.log(`chat-archive: archiving session ${String(id)}`)
           await this.ctx.workspaceRegistry.archiveSession(id as SessionId)
         } catch (error) {
           console.error(`chat-archive: archiveSession failed for ${String(id)}:`, error)
@@ -193,7 +166,6 @@ export class ChatArchiveRunner {
         undeterminable: decision.undeterminable,
         live: liveList,
       }
-      console.log(`chat-archive: scan completed - ${summary(outcome)}`)
       this.log(`chat-archive: ${summary(outcome)}${decision.selected.length > 0 ? ` (${decision.selected.join(', ')})` : ''}`)
       return outcome
     } catch (error) {
@@ -208,25 +180,17 @@ export class ChatArchiveRunner {
   private async lastActivityMs(header: SessionHeader): Promise<number | undefined> {
     try {
       const location = this.ctx.sessionPersistence.locate(header)
-      if (location === undefined) {
-        console.log(`chat-archive: locate returned undefined for session ${String(header.id)}`)
-        return undefined
-      }
-      console.log(`chat-archive: checking mtime for ${location.path}`)
-      
+      if (location === undefined) return undefined
       // 尝试读取文件 mtime
       try {
         const info = await stat(location.path)
-        console.log(`chat-archive: session ${String(header.id)} mtime: ${new Date(info.mtimeMs).toISOString()}`)
         return info.mtimeMs
       } catch (error: any) {
         // 如果文件不存在且路径包含 .v3.jsonl，尝试回退到旧格式 .jsonl
         if (error?.code === 'ENOENT' && location.path.includes('.v3.jsonl')) {
           const fallbackPath = location.path.replace('.v3.jsonl', '.jsonl')
-          console.log(`chat-archive: trying fallback path: ${fallbackPath}`)
           try {
             const info = await stat(fallbackPath)
-            console.log(`chat-archive: session ${String(header.id)} mtime (fallback): ${new Date(info.mtimeMs).toISOString()}`)
             return info.mtimeMs
           } catch (fallbackError: any) {
             console.error(`chat-archive: fallback also failed for session ${String(header.id)}:`, fallbackError)

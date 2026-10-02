@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-10-02
+
+### Changed
+- 🔼 **适配 DeepSeek Harness 0.2.0 运行时**（CLI / Desktop / Web）：peerDependencies 更新为 `^0.2.0-rc.2` 系列（dsh-session / dsh-session-persistence / dsh-settings / dsh-workspace）。
+- 🧹 清理 0.4.x 遗留的调试 `console.log` 噪声，仅保留必要错误日志与功能汇总。
+
+### Fixed
+- 无（0.4.1 的行为保持不变，仅提升运行时兼容范围）。
+
+[0.5.0]: https://github.com/ohmejj/dsh-chat-archive/releases/tag/v0.5.0
+
 ## [0.4.1] - 2026-09-14
 
 ### Changed

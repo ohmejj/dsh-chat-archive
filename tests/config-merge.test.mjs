@@ -8,7 +8,6 @@ test('current() merges partial config with defaults', () => {
     sessionPersistence: { list: async () => [] },
     workspaceRegistry: { archivedSessionIds: [], archiveSession: async () => {} },
     sessions: { get: () => undefined },
-    settings: { installSection: () => {} },
     effect: () => {}
   }
   
@@ -37,7 +36,6 @@ test('current() handles completely missing config', () => {
     sessionPersistence: { list: async () => [] },
     workspaceRegistry: { archivedSessionIds: [], archiveSession: async () => {} },
     sessions: { get: () => undefined },
-    settings: { installSection: () => {} },
     effect: () => {}
   }
   
