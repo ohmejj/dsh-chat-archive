@@ -105,7 +105,7 @@ export async function writeConfigToProfile(rootCtx: any, next: Partial<ChatArchi
       }
       const patches: any[] = readProfilePatches('dsh', profile, {
         ...loadProfileDirectory('dsh', profile.dir, profile.installAnchor),
-        patches: yaml.load(String(document), { schema: 'default' as any }) as any,
+        patches: yaml.load(String(document)) as any,
       })
       if (
         !isDeepStrictEqual(
