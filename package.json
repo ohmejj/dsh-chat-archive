@@ -1,6 +1,6 @@
 {
   "name": "@ohmejj/dsh-chat-archive",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "description": "DeepSeek Harness plugin: automatically archive idle conversations after a configurable threshold (hours/days), with its own Settings section UI.",
   "type": "module",
   "main": "./dist/index.js",
@@ -97,7 +97,6 @@
     "client": {
       "platform": "web",
       "inject": [
-        "@deepseek-ai/dsh-client-store",
         "@deepseek-ai/dsh-client-ui-settings"
       ]
     }
