@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.4] - 2026-10-02
+
+### Fixed
+- 🐛 **修复设置界面卡片不渲染**：`dsh.client.inject` 里声明的 `@deepseek-ai/dsh-client-store` 不是 client 模块提供者，导致 client 依赖图无法满足、我们的 client.js 永不执行（设置面板出现"对话自动归档"导航项但卡片空白、无任何表单控件）。移除该依赖后 client.js 正常加载执行，卡片完整渲染。
+- 🐛 **修复保存时 `Cannot read properties of undefined (reading 'length')`**：`yaml.load()` 传 `{ schema: 'default' }` 字符串参数导致 js-yaml 内部崩溃。去掉 schema 参数后保存正常，配置正确写入 profile patch。
+
+[0.5.4]: https://github.com/ohmejj/dsh-chat-archive/releases/tag/v0.5.4
+
 ## [0.5.3] - 2026-10-02
 
 ### Fixed
