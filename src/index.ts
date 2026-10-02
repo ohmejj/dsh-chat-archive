@@ -35,6 +35,11 @@ export const inject = ['sessionPersistence', 'workspaceRegistry', 'sessions', 'w
 
 /** Host JSON route the client card uses to read/write this plugin's config. */
 export const CONFIG_ROUTE = '/api/plugins/chat-archive/config'
+/** Direct manual-scan route. Unlike a config write, this does not rely on a
+ * profile reconciliation before the scan can begin. */
+export const RUN_ROUTE = '/api/plugins/chat-archive/run'
+/** Read-only progress route used to diagnose a scan without starting another. */
+export const STATUS_ROUTE = '/api/plugins/chat-archive/status'
 
 /** Minimal JSON body reader. */
 function readJsonBody(req: import('node:http').IncomingMessage): Promise<unknown> {
@@ -65,14 +70,14 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(payload)
 }
 
-/** Module-scoped singleton state, shared across re-applies of this entry. */
-let runner: ChatArchiveRunner | undefined
-let routeDone = false
+const runners = new WeakMap<object, ChatArchiveRunner>()
+let lastObservedRunNowTick: number | undefined
 
 /**
- * Plugin entry: keep a single runner across re-applies (config edits re-run
- * this with a new `config`), routing each resolved config into its
- * `setConfig`, and register the config JSON route once.
+ * Plugin entry: each Cordis runtime context owns its runner and route. A
+ * profile reconciliation disposes the old context before creating its
+ * replacement, so module-scoped route/runner singletons would otherwise leave
+ * the replacement with a disposed runner and no route.
  */
 export function apply(ctx: Context, userConfig?: Partial<ChatArchiveConfig>): void {
   const logger = (ctx as { logger?: { info(message: string): void; warn(message: string): void } }).logger
@@ -90,43 +95,89 @@ export function apply(ctx: Context, userConfig?: Partial<ChatArchiveConfig>): vo
   const rootCtx = (ctx as { root?: Context }).root ?? ctx
   // cordis already resolved & validated `Config` before calling apply; treat it
   // as the authoritative resolved config.
-  const resolved = ((userConfig ?? {}) as Partial<ChatArchiveConfig>) as ChatArchiveConfig
+  const resolved = { ...DEFAULT_CONFIG, ...(userConfig ?? {}) } as ChatArchiveConfig
+  const manual = lastObservedRunNowTick !== undefined && resolved.runNowTick > lastObservedRunNowTick
+  lastObservedRunNowTick = Math.max(lastObservedRunNowTick ?? resolved.runNowTick, resolved.runNowTick)
 
+  let currentRunner = runners.get(ctx as unknown as object)
   try {
-    if (runner === undefined) {
-      runner = new ChatArchiveRunner(ctx as unknown as RunnerServices, log)
-      runner.setConfig(resolved)
-      runner.start()
+    if (currentRunner === undefined) {
+      currentRunner = new ChatArchiveRunner(ctx as unknown as RunnerServices, log)
+      runners.set(ctx as unknown as object, currentRunner)
+      currentRunner.start()
       log('chat-archive: runner started')
-    } else {
-      runner.setConfig(resolved)
     }
+    currentRunner.setConfig(resolved, manual)
   } catch (error) {
     console.error('chat-archive: runner failed to start:', error)
     log(`chat-archive: runner failed to start: ${String(error)}`)
+    return
   }
 
-  // Register the config JSON route exactly once (apply re-runs on every edit).
-  if (routeDone !== true) {
-    const webServer = (ctx as { webServer?: RunnerServices['webServer'] }).webServer
-    if (webServer !== undefined) {
-      try {
-        const disposer = webServer.register({
-          kind: 'exact',
-          path: CONFIG_ROUTE,
-          handler: (req, res) => {
-            void handleConfigRoute(req as import('node:http').IncomingMessage, res, rootCtx, log)
-          },
-        })
-        routeDone = true
-        if (typeof disposer === 'function') {
-          ctx.effect(() => disposer, 'chat-archive: config route disposal')
-        }
-        log(`chat-archive: config route ${CONFIG_ROUTE} registered`)
-      } catch (error) {
-        console.error('chat-archive: failed to register config route:', error)
-      }
+  // The route lifetime must match this runtime context.  It is registered
+  // again after every profile reconciliation and automatically disposed with
+  // the replaced context.
+  const webServer = (ctx as { webServer?: RunnerServices['webServer'] }).webServer
+  if (webServer !== undefined) {
+    try {
+      const configDisposer = webServer.register({
+        kind: 'exact',
+        path: CONFIG_ROUTE,
+        handler: (req, res) => {
+          void handleConfigRoute(req as import('node:http').IncomingMessage, res, rootCtx, currentRunner, log)
+        },
+      })
+      const runDisposer = webServer.register({
+        kind: 'exact',
+        path: RUN_ROUTE,
+        handler: (req, res) => {
+          void handleRunRoute(req as import('node:http').IncomingMessage, res, currentRunner, log)
+        },
+      })
+      const statusDisposer = webServer.register({
+        kind: 'exact',
+        path: STATUS_ROUTE,
+        handler: (_req, res) => {
+          sendJson(res, 200, currentRunner.status())
+        },
+      })
+      ctx.effect(
+        () => () => {
+          statusDisposer()
+          runDisposer()
+          configDisposer()
+        },
+        'chat-archive: web route disposal',
+      )
+      log(`chat-archive: routes ${CONFIG_ROUTE}, ${RUN_ROUTE}, and ${STATUS_ROUTE} registered`)
+    } catch (error) {
+      console.error('chat-archive: failed to register config route:', error)
     }
+  }
+}
+
+/** Route handler for the user-visible “Archive now” action. */
+async function handleRunRoute(
+  req: import('node:http').IncomingMessage,
+  res: ServerResponse,
+  runner: ChatArchiveRunner,
+  log: (message: string) => void,
+): Promise<void> {
+  if ((req.method ?? 'POST') !== 'POST') {
+    sendJson(res, 405, { error: `method ${req.method ?? 'POST'} not allowed` })
+    return
+  }
+  try {
+    const outcome = await runner.runScan('manual', { allowWhenDisabled: true })
+    if (outcome === null) {
+      sendJson(res, 409, { error: 'a scan is already running or the runner was stopped' })
+      return
+    }
+    sendJson(res, 200, { ok: true, outcome })
+  } catch (error) {
+    console.error('chat-archive: manual scan route error:', error)
+    log(`chat-archive: manual scan route error: ${String(error)}`)
+    sendJson(res, 500, { error: String(error) })
   }
 }
 
@@ -135,20 +186,17 @@ async function handleConfigRoute(
   req: import('node:http').IncomingMessage,
   res: ServerResponse,
   rootCtx: Context,
+  runner: ChatArchiveRunner,
   log: (message: string) => void,
 ): Promise<void> {
   const method = req.method ?? 'GET'
   try {
     if (method === 'GET') {
-      const config = runner !== undefined ? runner.current() : { ...DEFAULT_CONFIG }
+      const config = runner.current()
       sendJson(res, 200, config)
       return
     }
     if (method === 'POST') {
-      if (runner === undefined) {
-        sendJson(res, 500, { error: 'runner not ready' })
-        return
-      }
       const body = (await readJsonBody(req)) as Partial<ChatArchiveConfig> | undefined
       if (body === undefined || typeof body !== 'object') {
         sendJson(res, 400, { error: 'expected a JSON config object' })

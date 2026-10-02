@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.5] - 2026-10-03
+
+### Fixed
+- 🐛 **修复“立即归档”未实际处理会话**：改为由独立 Host 路由直接执行扫描，不再依赖配置重载时的 `runNowTick`；每个 Web 路由闭包绑定所属 Cordis 上下文的 runner，避免重载后请求落到已失效或错误的扫描器。
+- 🐛 **修复立即归档与定时扫描忽略活跃会话**：超过阈值的活跃会话现在调用 DSH 原生 `archiveSession(..., { stopActivity: true })`，先持久化归档标记、再停止活动，避免停止操作唤醒会话后继续运行。
+- 🐛 **修复恢复旧会话后被误判为“未到阈值”**：不再采用压缩日志文件 mtime；改为读取最后一条真实会话事件时间，并忽略 `session/end-seed` 等恢复生命周期记录。DSH 重启/恢复不会再重置闲置计时。
+- 🐛 **修复配置保存的竞态失败**：配置页面以一次完整的原子 POST 保存所有字段，避免逐字段写入触发 profile reconcile 后使后续请求命中旧 runner。
+- 🐛 **修复设置页与路由在 profile reconcile 后失效**：路由注册及释放与对应 Cordis 上下文绑定，确保配置保存、立即归档和状态读取在重载后持续可用。
+
+### Changed
+- ✨ **立即归档结果可观测**：设置页现在同时展示新归档数量、未达到阈值数量和活跃会话数量，避免将“已扫描但仍未超过阈值”误解为扫描失败。
+- 📝 设置说明明确：闲置时间以最后一条真实会话事件计算；满足阈值的活跃会话会被停止并归档。
+
+[0.5.5]: https://github.com/ohmejj/dsh-chat-archive/releases/tag/v0.5.5
+
 ## [0.5.4] - 2026-10-02
 
 ### Fixed

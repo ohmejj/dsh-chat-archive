@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { DEFAULT_CONFIG, thresholdMs, effectiveIdleMs, validateConfig } from '../dist/index.js'
 import { decideArchivable } from '../dist/index.js'
+import { ChatArchiveRunner } from '../dist/archiver.js'
 
 const day = 86_400_000
 
@@ -25,6 +26,54 @@ test('effectiveIdleMs requires idle across a full scan interval too', () => {
 test('default config is valid and safe (archiving off)', () => {
   assert.equal(DEFAULT_CONFIG.enabled, false)
   assert.doesNotThrow(() => validateConfig(DEFAULT_CONFIG))
+})
+
+test('manual scan works while scheduled archiving is disabled', async () => {
+  const archived = []
+  const mockCtx = {
+    sessionPersistence: {
+      list: async () => [{ header: { id: 'old-session' } }],
+      open: async () => ({ read: async () => ({ events: [] }), close: async () => {} }),
+    },
+    workspaceRegistry: {
+      archivedSessionIds: [],
+      archiveSession: async (id) => archived.push(id),
+    },
+    sessions: { get: () => undefined },
+    effect: () => {},
+  }
+  const runner = new ChatArchiveRunner(mockCtx, () => {})
+  runner['source'] = () => ({ ...DEFAULT_CONFIG, enabled: false, unit: 'minutes', threshold: 1, intervalMinutes: 1 })
+  runner['lastActivityMs'] = async () => Date.now() - 10 * 60_000
+
+  const outcome = await runner.runScan('manual', { allowWhenDisabled: true })
+
+  assert.deepEqual(archived, ['old-session'])
+  assert.deepEqual(outcome?.archived, ['old-session'])
+})
+
+test('an old active session is stopped through the native archive protocol', async () => {
+  const archived = []
+  const mockCtx = {
+    sessionPersistence: {
+      list: async () => [{ header: { id: 'active-old-session' } }],
+      open: async () => ({ read: async () => ({ events: [] }), close: async () => {} }),
+    },
+    workspaceRegistry: {
+      archivedSessionIds: [],
+      archiveSession: async (id, options) => archived.push({ id, options }),
+    },
+    sessions: { get: () => ({ id: 'active-old-session' }) },
+    effect: () => {},
+  }
+  const runner = new ChatArchiveRunner(mockCtx, () => {})
+  runner['source'] = () => ({ ...DEFAULT_CONFIG, enabled: true, unit: 'minutes', threshold: 1, intervalMinutes: 1 })
+  runner['lastActivityMs'] = async () => Date.now() - 10 * 60_000
+
+  const outcome = await runner.runScan('manual')
+
+  assert.deepEqual(archived, [{ id: 'active-old-session', options: { stopActivity: true } }])
+  assert.deepEqual(outcome?.archived, ['active-old-session'])
 })
 
 test('validateConfig rejects bad values', () => {
