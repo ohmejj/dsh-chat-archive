@@ -56,6 +56,48 @@ export interface ScanOutcome {
 const MS = 1000
 const INITIAL_SCAN_DELAY_MS = 3 * MS
 
+/**
+ * Expand a located session path into the set of on-disk artifact variants the
+ * DSH session store may actually use. The store has changed backends across
+ * versions (`.jsonl`, `.v3.jsonl`, `.v4.jsonl`, and current zstd-compressed
+ * `.jsonl.zstd` / `.v3.jsonl.zstd` / `.v4.jsonl.zstd`), and `locate` may point
+ * at a path the on-disk file doesn't match exactly. We try the primary then
+ * each plausible variant so a renamed/compressed artifact still yields its
+ * mtime (the real activity signal).
+ */
+function candidates(path: string): string[] {
+  const out = new Set<string>([path])
+  // strip compression and version to get a bare fragment, then re-add variants
+  const bare = path.replace(/\.v\d+\.jsonl(\.zstd)?$/, '').replace(/\.jsonl(\.zstd)?$/, '')
+  if (bare !== path) {
+    for (const suffix of ['.jsonl', '.v3.jsonl', '.v4.jsonl', '.jsonl.zstd', '.v3.jsonl.zstd', '.v4.jsonl.zstd']) {
+      out.add(bare + suffix)
+    }
+  }
+  return Array.from(out)
+}
+
+/** Return the mtime of the first existing candidate, else undefined. */
+async function statOneOf(paths: string[]): Promise<number | undefined> {
+  let lastError: unknown
+  for (const p of paths) {
+    try {
+      const info = await stat(p)
+      return info.mtimeMs
+    } catch (error: any) {
+      if (error?.code === 'ENOENT') {
+        lastError = error
+        continue
+      }
+      throw error
+    }
+  }
+  // All variants missing: inspect the containing dir to avoid spurious errors
+  // if the session simply has no artifact yet (fresh) — treated as "no mtime".
+  void lastError
+  return undefined
+}
+
 /** Human summary for logs. */
 function summary(outcome: ScanOutcome): string {
   const parts = [`archived=${outcome.archived.length}`, `recent=${outcome.recent.length}`, `unknown=${outcome.undeterminable.length}`, `live=${outcome.live.length}`]
@@ -181,24 +223,7 @@ export class ChatArchiveRunner {
     try {
       const location = this.ctx.sessionPersistence.locate(header)
       if (location === undefined) return undefined
-      // 尝试读取文件 mtime
-      try {
-        const info = await stat(location.path)
-        return info.mtimeMs
-      } catch (error: any) {
-        // 如果文件不存在且路径包含 .v3.jsonl，尝试回退到旧格式 .jsonl
-        if (error?.code === 'ENOENT' && location.path.includes('.v3.jsonl')) {
-          const fallbackPath = location.path.replace('.v3.jsonl', '.jsonl')
-          try {
-            const info = await stat(fallbackPath)
-            return info.mtimeMs
-          } catch (fallbackError: any) {
-            console.error(`chat-archive: fallback also failed for session ${String(header.id)}:`, fallbackError)
-            return undefined
-          }
-        }
-        throw error
-      }
+      return await statOneOf(candidates(location.path))
     } catch (error) {
       console.error(`chat-archive: failed to get mtime for session ${String(header.id)}:`, error)
       return undefined
